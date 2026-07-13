@@ -19,6 +19,8 @@ import (
 type HotStatsProvider interface {
 	// HotLen 为当前热集大小（0 ⇒ 未就绪）。
 	HotLen() int
+	// Cap 为当前热集容量上限（可热更）。
+	Cap() int
 	// PoolStats 返回热/冷却 gauge（可选；可空安全）。
 	PoolStats() (hotSize, cooldown int)
 }
@@ -34,6 +36,14 @@ func (s IndexStats) HotLen() int {
 		return 0
 	}
 	return s.Index.Len()
+}
+
+// Cap 实现 HotStatsProvider / admin.HotStats。
+func (s IndexStats) Cap() int {
+	if s.Index == nil {
+		return 0
+	}
+	return s.Index.Cap()
 }
 
 // PoolStats 实现 HotStatsProvider。

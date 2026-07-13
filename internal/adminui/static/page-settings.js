@@ -159,13 +159,13 @@ export function renderSettings() {
       if (s && s.settings) s = Object.assign({}, s.settings, { persisted_path: s.persisted_path });
       s = s || {};
       var html = "";
-      html += section("sel", "选号 / 热池", "策略/权重/粘性即时生效；热池大小变更仅落盘，需重启后扩容",
+      html += section("sel", "选号 / 热池", "策略/权重/粘性即时生效；热池大小保存后 Resize 并重建热集（大库重建可能要几秒）",
         fieldSelect("策略", "sStrat", s.selector_strategy || "pow2_least_load", [
           { v: "pow2_least_load", l: "pow2_least_load" },
           { v: "sticky", l: "sticky" },
           { v: "random", l: "random" }
         ]) +
-        field("热池大小（需重启）", "sHot", s.hot_size) +
+        field("热池大小（保存后即时重建）", "sHot", s.hot_size) +
         field("单账号最大并发", "sMaxInf", s.max_inflight_per_account) +
         field("粘性 TTL 秒", "sSticky", s.sticky_ttl_sec) +
         field("粘性 LRU 容量", "sStickyMax", s.sticky_max) +
@@ -208,7 +208,7 @@ export function renderSettings() {
         field("默认 RPM", "sTR", s.token_default_rpm) +
         fieldBool("默认无限额度", "sTU", !!s.token_default_unlimited)
       );
-      html += section("import", "导入 / SSO 转换", "限制热更；填 SSO endpoint+key 可热重建转换器",
+      html += section("import", "导入 / SSO 转换", "JSON 秒级落库；SSO 需逐条 Device Flow 换票故更慢。可提高 SSO workers。空 endpoint 用内置 Go 转换器；也可 scripts/sso_convert.py",
         fieldBool("启用导入", "sImpEn", !!s.import_enabled) +
         field("最大上传字节(0=不限)", "sImpUp", s.import_max_upload_bytes) +
         field("最大条目(默认1万)", "sImpEnt", s.import_max_entries) +

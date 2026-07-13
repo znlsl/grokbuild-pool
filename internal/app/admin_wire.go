@@ -113,6 +113,14 @@ func wireAdmin(cfg config.Config, pool *poolStack, up *upstreamStack, metrics *h
 	settingsCtl := &admin.SettingsController{
 		Path:     settingsPath,
 		Hot:      pool.Hot,
+		ReloadHot: func(newSize int) error {
+			n, err := pool.Hot.LoadEligible(pool.Catalog)
+			if err != nil {
+				return err
+			}
+			logger.Info("hot_index_resized", "cap", pool.Hot.Cap(), "loaded", n, "requested", newSize)
+			return nil
+		},
 		Lease:    pool.Lease,
 		Selector: pool.Selector,
 		Refresh:  up.Refresh,
@@ -211,7 +219,13 @@ func wireAdmin(cfg config.Config, pool *poolStack, up *upstreamStack, metrics *h
 			ssoKeyHold = key
 		} else {
 			// 未配置远程转换器时始终使用内置 Go Device Flow
-			conv = ssoimport.NewLocalConverter()
+			lc := ssoimport.NewLocalConverter()
+			w := in.ImportSSOWorkers
+			if w <= 0 {
+				w = 12
+			}
+			lc.Configure(w, w, 50*time.Millisecond)
+			conv = lc
 		}
 		importJobs.ApplyOptions(importjobs.Options{
 			MaxConcurrentJobs:  in.ImportMaxConcurrentJobs,

@@ -71,13 +71,40 @@ func NewLocalConverter() *LocalConverter {
 		Scopes:          defaultScopes,
 		Timeout:         30 * time.Second,
 		PollTimeout:     90 * time.Second,
-		MaxRetries:      3,
-		Workers:         4,
-		FlowConcurrency: 2,
-		FlowGap:         500 * time.Millisecond,
+		MaxRetries:      2,
+		Workers:         12,
+		FlowConcurrency: 8,
+		FlowGap:         80 * time.Millisecond,
 	}
 	lc.flowSem = make(chan struct{}, lc.FlowConcurrency)
 	return lc
+}
+
+// Configure 调整并发参数（管理台热更 / 导入任务重建转换器时调用）。
+func (c *LocalConverter) Configure(workers, flowConcurrency int, flowGap time.Duration) {
+	if c == nil {
+		return
+	}
+	if workers > 0 {
+		if workers > 16 {
+			workers = 16
+		}
+		c.Workers = workers
+	}
+	if flowConcurrency <= 0 {
+		flowConcurrency = c.Workers
+	}
+	if flowConcurrency > 16 {
+		flowConcurrency = 16
+	}
+	if flowConcurrency < 1 {
+		flowConcurrency = 1
+	}
+	c.FlowConcurrency = flowConcurrency
+	if flowGap > 0 {
+		c.FlowGap = flowGap
+	}
+	c.flowSem = make(chan struct{}, c.FlowConcurrency)
 }
 
 // Convert 实现与 HTTP Client 相同的批量接口：按输入顺序返回结果。

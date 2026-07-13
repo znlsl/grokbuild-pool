@@ -122,6 +122,7 @@ func constantTimeAdminKeyEq(got, want string) bool {
 // HotStats 热池只读指标（供仪表盘）。
 type HotStats interface {
 	HotLen() int
+	Cap() int
 	PoolStats() (hotSize, cooldown int)
 }
 
@@ -265,6 +266,12 @@ func (h *Handlers) PoolStats(w http.ResponseWriter, r *http.Request) {
 	if !h.StartedAt.IsZero() {
 		uptime = time.Since(h.StartedAt).Seconds()
 	}
+	hotCap := h.Config.HotSize
+	if h.Hot != nil {
+		if c := h.Hot.Cap(); c > 0 {
+			hotCap = c
+		}
+	}
 	out := map[string]any{
 		"version":            h.Version,
 		"uptime_seconds":     uptime,
@@ -276,15 +283,15 @@ func (h *Handlers) PoolStats(w http.ResponseWriter, r *http.Request) {
 		"pool_hot_size":      hotSize,
 		"pool_cooldown_size": cooldown,
 		// 历史字段名 process_rss_bytes 实际为 MemStats.Sys，保留键名兼容并增加准确别名
-			"process_rss_bytes":  ms.Sys,
-			"process_sys_bytes":  ms.Sys,
-		"go_goroutines":      runtime.NumGoroutine(),
-		"tokens_total":       tokTotal,
-		"tokens_enabled":     tokEnabled,
-		"tokens_exhausted":   tokExhausted,
-		"listen":             h.Config.Listen,
-		"hot_cap":            h.Config.HotSize,
-		"max_concurrent":     h.Config.Limits.MaxConcurrent,
+		"process_rss_bytes": ms.Sys,
+		"process_sys_bytes": ms.Sys,
+		"go_goroutines":     runtime.NumGoroutine(),
+		"tokens_total":      tokTotal,
+		"tokens_enabled":    tokEnabled,
+		"tokens_exhausted":  tokExhausted,
+		"listen":            h.Config.Listen,
+		"hot_cap":           hotCap,
+		"max_concurrent":    h.Config.Limits.MaxConcurrent,
 	}
 	// P1：refresh / quarantine
 	if x, ok := h.Metrics.(interface {

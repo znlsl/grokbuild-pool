@@ -106,6 +106,28 @@ func (idx *Index) Cap() int {
 	return idx.cap
 }
 
+// Resize 热更新热集容量。仅改 cap/cfg；调用方应随后 LoadEligible 填满/收缩。
+// n<=0 时回落 DefaultHotSize。
+func (idx *Index) Resize(n int) {
+	if idx == nil {
+		return
+	}
+	if n <= 0 {
+		n = DefaultHotSize
+	}
+	idx.mu.Lock()
+	idx.cap = n
+	idx.cfg.HotSize = n
+	// 若当前热集超过新容量，按 ids 顺序截断尾部（LoadEligible 会按优先级重建，
+	// 这里只是防止短暂超容）。
+	for len(idx.ids) > n {
+		id := idx.ids[len(idx.ids)-1]
+		idx.removeLocked(id)
+		delete(idx.hot, id)
+	}
+	idx.mu.Unlock()
+}
+
 // Len 返回当前热集大小。
 func (idx *Index) Len() int {
 	idx.mu.RLock()

@@ -121,6 +121,8 @@ type SettingsController struct {
 	Path string
 
 	Hot      *hot.Index
+	// ReloadHot 可选：hot_size 变更后按新容量重建热集（通常 LoadEligible）。
+	ReloadHot func(newSize int) error
 	Lease    *lease.Manager
 	Selector *selector.Selector
 	Refresh  *refresh.Service
@@ -484,10 +486,8 @@ func (c *SettingsController) Apply(in RuntimeSettings) (RuntimeSettings, error) 
 	if in.UpstreamBaseURL != pi.UpstreamBaseURL {
 		restart = append(restart, "upstream_base_url")
 	}
-	// hot_size / refresh_workers 持久化但运行时无法完整热更（索引容量与 worker 数在启动时固定）
-	if in.HotSize != prev.HotSize {
-		restart = append(restart, "hot_size")
-	}
+	// refresh_workers 持久化但运行时无法完整热更（worker 数启动固定）
+	// hot_size 已支持 Resize + ReloadHot 即时重建热集
 	if in.RefreshWorkers != prev.RefreshWorkers {
 		restart = append(restart, "refresh_workers")
 	}
@@ -524,6 +524,16 @@ func (c *SettingsController) Apply(in RuntimeSettings) (RuntimeSettings, error) 
 	// 即时生效：账号 inflight 硬限
 	if c.Hot != nil {
 		c.Hot.SetMaxInflightPerAccount(in.MaxInflightPerAccount)
+	}
+	// 即时生效：热池容量（Resize + 可选 ReloadHot 重建）
+	hotSizeChanged := in.HotSize > 0 && in.HotSize != prev.HotSize
+	if hotSizeChanged && c.Hot != nil {
+		c.Hot.Resize(in.HotSize)
+		if c.ReloadHot != nil {
+			if err := c.ReloadHot(in.HotSize); err != nil {
+				return in, fmt.Errorf("settings: reload hot after resize: %w", err)
+			}
+		}
 	}
 	// 即时生效：租约冷却
 	if c.Lease != nil {
