@@ -47,15 +47,32 @@ type Handlers struct {
 	ImportJobs *importjobs.Manager
 }
 
+// effectiveAdminKey 优先使用设置页热更新后的密钥。
+func (h *Handlers) effectiveAdminKey() string {
+	if h != nil && h.Settings != nil {
+		if k := strings.TrimSpace(h.Settings.PeekAdminKey()); k != "" {
+			return k
+		}
+	}
+	if h == nil {
+		return ""
+	}
+	return strings.TrimSpace(h.AdminKey)
+}
+
 // RequireAdmin 校验 admin_key（Bearer 或 x-admin-key）。
 func (h *Handlers) RequireAdmin(next http.HandlerFunc) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		if h == nil || strings.TrimSpace(h.AdminKey) == "" {
+		want := ""
+		if h != nil {
+			want = h.effectiveAdminKey()
+		}
+		if want == "" {
 			writeErr(w, http.StatusServiceUnavailable, "未配置 admin_key")
 			return
 		}
 		key := extractAdminKey(r)
-		if key == "" || key != h.AdminKey {
+		if key == "" || key != want {
 			writeErr(w, http.StatusUnauthorized, "admin 鉴权失败")
 			return
 		}

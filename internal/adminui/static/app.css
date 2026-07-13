@@ -1276,3 +1276,31 @@ tr.tok-detail-row td {
 tr.tok-detail-row.hidden {
   display: none;
 }
+
+/* Settings designer */
+.form-row-dense {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(220px, 1fr));
+  gap: 12px 14px;
+  align-items: end;
+}
+.field-wide {
+  grid-column: 1 / -1;
+}
+.field-wide textarea.input {
+  width: 100%;
+  min-height: 120px;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 12px;
+  line-height: 1.45;
+  resize: vertical;
+}
+.settings-section .panel-section-title {
+  margin-bottom: 4px;
+}
+.panel-stack {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+

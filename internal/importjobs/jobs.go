@@ -154,6 +154,57 @@ type Manager struct {
 	closing   bool
 }
 
+// OptionsSnapshot 返回当前导入限制副本（管理台展示/编辑）。
+func (m *Manager) OptionsSnapshot() Options {
+	if m == nil {
+		return Options{}
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return m.opts
+}
+
+// ApplyOptions 热更新导入限制（不影响已在跑的任务；新任务立即生效）。
+// Converter 指针若传入非 nil 则替换；nil 表示保留原转换器。
+func (m *Manager) ApplyOptions(in Options) {
+	if m == nil {
+		return
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	cur := m.opts
+	if in.MaxConcurrentJobs > 0 {
+		cur.MaxConcurrentJobs = in.MaxConcurrentJobs
+	}
+	if in.Workers > 0 {
+		cur.Workers = in.Workers
+	}
+	if in.MaxEntries > 0 {
+		cur.MaxEntries = in.MaxEntries
+	}
+	if in.MaxNDJSONLineBytes > 0 {
+		cur.MaxNDJSONLineBytes = in.MaxNDJSONLineBytes
+	}
+	if in.MaxSSOValueBytes > 0 {
+		cur.MaxSSOValueBytes = in.MaxSSOValueBytes
+	}
+	if in.JobTimeout > 0 {
+		cur.JobTimeout = in.JobTimeout
+	}
+	if in.StagingStaleAfter > 0 {
+		cur.StagingStaleAfter = in.StagingStaleAfter
+	}
+	// bool 与 converter 显式覆盖
+	cur.AllowServerPath = in.AllowServerPath
+	if in.Converter != nil {
+		cur.Converter = in.Converter
+	}
+	if in.AfterImport != nil {
+		cur.AfterImport = in.AfterImport
+	}
+	m.opts = cur
+}
+
 // New 保留旧调用方行为：允许 data_dir 下本地单文件路径。
 func New(dataDir string, cat *catalog.Catalog) *Manager {
 	m, err := newManager(dataDir, cat, Options{AllowServerPath: true})

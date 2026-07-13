@@ -9,6 +9,7 @@ import (
 	"io"
 	"net/http"
 	"strings"
+	"sync"
 
 	"github.com/yshgsh1343/grokbuild2api/internal/protocol/config"
 	"github.com/yshgsh1343/grokbuild2api/internal/protocol/lb"
@@ -22,12 +23,58 @@ type PostResponsesFunc func(ctx context.Context, model, convID string, body []by
 // Handlers serves Anthropic Messages endpoints.
 type Handlers struct {
 	Post PostResponsesFunc
+	mu   sync.RWMutex
 	Cfg  config.AnthropicConfig
 	// ResolveModel maps client model → upstream. If nil, uses Cfg.ModelAliases + passthrough.
 	ResolveModel func(string) string
 	MaxBody      int64
 	// MaxBodyFunc, when set, supplies the current runtime limit per request.
 	MaxBodyFunc func() int64
+}
+
+
+// SnapshotCfg 返回当前 Anthropic 配置副本。
+func (h *Handlers) SnapshotCfg() config.AnthropicConfig {
+	if h == nil {
+		return config.AnthropicConfig{}
+	}
+	h.mu.RLock()
+	defer h.mu.RUnlock()
+	return cloneAnthropic(h.Cfg)
+}
+
+// ApplyCfg 热更新 Anthropic 配置。
+func (h *Handlers) ApplyCfg(cfg config.AnthropicConfig) {
+	if h == nil {
+		return
+	}
+	h.mu.Lock()
+	h.Cfg = cloneAnthropic(cfg)
+	h.mu.Unlock()
+}
+
+func cloneAnthropic(in config.AnthropicConfig) config.AnthropicConfig {
+	out := in
+	if in.ModelAliases != nil {
+		out.ModelAliases = make(map[string]string, len(in.ModelAliases))
+		for k, v := range in.ModelAliases {
+			out.ModelAliases[k] = v
+		}
+	}
+	if in.PassthroughPrefixes != nil {
+		out.PassthroughPrefixes = append([]string(nil), in.PassthroughPrefixes...)
+	}
+	return out
+}
+
+// liveCfg 读取当前配置（请求路径用）。
+func (h *Handlers) liveCfg() config.AnthropicConfig {
+	if h == nil {
+		return config.AnthropicConfig{}
+	}
+	h.mu.RLock()
+	defer h.mu.RUnlock()
+	return h.Cfg
 }
 
 func (h *Handlers) maxBody() int64 {
@@ -49,7 +96,7 @@ func (h *Handlers) resolve(model string) string {
 	if h.ResolveModel != nil {
 		return h.ResolveModel(model)
 	}
-	return h.Cfg.ResolveModel(model)
+	return h.liveCfg().ResolveModel(model)
 }
 
 // HandleMessages serves POST /v1/messages (query ?beta=true is ignored).
@@ -98,7 +145,7 @@ func (h *Handlers) HandleMessages(w http.ResponseWriter, r *http.Request) {
 	body, originalModel, stream, err := TranslateRequest(raw, TranslateReqOptions{
 		ResolvedModel:     resolved,
 		ConvID:            convID,
-		StripUnknownBetas: h.Cfg.StripUnknownBetas,
+		StripUnknownBetas: h.liveCfg().StripUnknownBetas,
 	})
 	if err != nil {
 		WriteError(w, http.StatusBadRequest, err.Error())

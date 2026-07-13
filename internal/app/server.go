@@ -9,6 +9,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/yshgsh1343/grokbuild2api/internal/admin"
 	"github.com/yshgsh1343/grokbuild2api/internal/adminui"
 	"github.com/yshgsh1343/grokbuild2api/internal/config"
 	"github.com/yshgsh1343/grokbuild2api/internal/httpserver"
@@ -26,6 +27,25 @@ func serveHTTP(cfg config.Config, pool *poolStack, up *upstreamStack, adm *admin
 		Post:    up.Executor.Post,
 		Cfg:     cfg.Anthropic,
 		MaxBody: cfg.Limits.MaxBodyBytes,
+	}
+	// 设置页可热更 Anthropic 别名/开关
+	if adm.Settings != nil {
+		adm.Settings.ApplyAnthropic = func(in admin.RuntimeSettings) {
+			cfgA := anth.SnapshotCfg()
+			cfgA.Enabled = in.AnthropicEnabled
+			cfgA.StripUnknownBetas = in.AnthropicStripUnknownBetas
+			cfgA.CountTokens = in.AnthropicCountTokens
+			if len(in.AnthropicModelAliases) > 0 {
+				cfgA.ModelAliases = in.AnthropicModelAliases
+			}
+			if len(in.AnthropicPassthroughPrefixes) > 0 {
+				cfgA.PassthroughPrefixes = in.AnthropicPassthroughPrefixes
+			}
+			anth.ApplyCfg(cfgA)
+		}
+		// 用当前 settings 覆盖启动时的 anthropic 配置
+		snap := adm.Settings.Snapshot().RuntimeSettings
+		adm.Settings.ApplyAnthropic(snap)
 	}
 
 	metrics := &httpserver.Metrics{}

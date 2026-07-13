@@ -625,20 +625,50 @@
     });
   }
 
-  function field(label, id, val, type) {
+  function field(label, id, val, type, attrs) {
     type = type || "number";
-    return '<div><label for="' + id + '">' + label + '</label><input id="' + id +
-      '" class="input" type="' + type + '" value="' + (val == null ? "" : val) + '" /></div>';
+    attrs = attrs || "";
+    var v = val == null ? "" : String(val);
+    return '<div class="field"><label for="' + id + '">' + label + '</label><input id="' + id +
+      '" class="input" type="' + type + '" value="' + esc(v) + '" ' + attrs + " /></div>";
   }
 
+  function fieldText(label, id, val, placeholder) {
+    return field(label, id, val, "text", placeholder ? 'placeholder="' + esc(placeholder) + '"' : "");
+  }
+
+  function fieldSelect(label, id, val, options) {
+    // options: [{v,l}]
+    var opts = (options || []).map(function (o) {
+      var sel = String(o.v) === String(val) ? " selected" : "";
+      return '<option value="' + esc(String(o.v)) + '"' + sel + ">" + esc(o.l) + "</option>";
+    }).join("");
+    return '<div class="field"><label for="' + id + '">' + label + '</label><select id="' + id +
+      '" class="input">' + opts + "</select></div>";
+  }
+
+  function fieldBool(label, id, val) {
+    return fieldSelect(label, id, val ? "1" : "0", [
+      { v: "0", l: "否" },
+      { v: "1", l: "是" }
+    ]);
+  }
+
+  function fieldArea(label, id, val, rows) {
+    rows = rows || 6;
+    var v = val == null ? "" : String(val);
+    return '<div class="field field-wide"><label for="' + id + '">' + label + '</label>' +
+      '<textarea id="' + id + '" class="input mono" rows="' + rows + '">' + esc(v) + "</textarea></div>";
+  }
 
   function renderSettings() {
     stopPoll();
     setAuthed(true);
     $("main").innerHTML = wrapPage(
-      pageHd("配置管理", "全部运行参数 · 分组编辑 · 热更新并持久化到 settings.json",
+      pageHd("参数设计器", "全部运行参数均可在此编辑 · 热更新即时生效 · 密钥字段留空表示不修改",
         '<button type="button" class="page-action-btn" id="reloadSet">重新加载</button>' +
         '<button type="button" class="page-action-btn-primary" id="saveSet">保存并应用</button>') +
+      '<div id="setHint"></div>' +
       '<div id="setErr"></div>' +
       '<div id="setForm" class="panel-stack"></div>' +
       '<div class="panel"><div class="panel-title">当前 JSON 快照</div>' +
@@ -646,38 +676,73 @@
     );
 
     function section(title, note, fieldsHtml) {
-      return '<div class="panel">' +
+      return '<div class="panel settings-section">' +
         '<div class="section-title panel-section-title">' + title + "</div>" +
         (note ? '<p class="muted panel-note">' + note + "</p>" : "") +
-        '<div class="form-row">' + fieldsHtml + "</div></div>";
+        '<div class="form-row form-row-dense">' + fieldsHtml + "</div></div>";
     }
 
-    function ro(label, val) {
-      return '<div><label>' + label + '</label>' +
-        '<input class="input" type="text" value="' + esc(val == null ? "" : String(val)) +
-        '" readonly style="opacity:.75;cursor:default" /></div>';
+    function aliasesToText(map) {
+      if (!map || typeof map !== "object") return "";
+      return Object.keys(map).sort().map(function (k) {
+        return k + " = " + map[k];
+      }).join("\n");
+    }
+    function textToAliases(text) {
+      var out = {};
+      String(text || "").split(/\r?\n/).forEach(function (line) {
+        line = line.trim();
+        if (!line || line.charAt(0) === "#") return;
+        var m = line.split(/\s*=\s*|\s*:\s*|\s+/);
+        if (m.length >= 2) {
+          var k = m[0].trim();
+          var v = m.slice(1).join(" ").trim();
+          if (k && v) out[k] = v;
+        }
+      });
+      return out;
+    }
+    function prefixesToText(arr) {
+      return (arr || []).join(", ");
+    }
+    function textToPrefixes(text) {
+      return String(text || "").split(/[,\n]/).map(function (s) { return s.trim(); }).filter(Boolean);
     }
 
     function load() {
       api("/admin/settings").then(function (s) {
-        // Snapshot may nest under settings or be flat
         if (s && s.settings) s = Object.assign({}, s.settings, { persisted_path: s.persisted_path });
         window.__settings = s || {};
         var path = s.persisted_path || "（内存）";
+        var hint = $("setHint");
+        if (hint) {
+          if (s.restart_hint) {
+            hint.innerHTML = '<div class="err-box" style="border-color:var(--color-warning,#c90)">' +
+              esc(s.restart_hint) + "</div>";
+          } else {
+            hint.innerHTML = '<p class="muted">持久化：' + esc(path) +
+              " · 密钥 / SSO key 留空=不改 · GET 永不回传明文</p>";
+          }
+        }
         var html = "";
-        html += section("选号 / 热池", "max_inflight 为硬上限；权重影响 pow2 打分",
-          field("热池大小(展示)", "sHot", s.hot_size) +
+        html += section("选号 / 热池", "pow2 / sticky / 权重即时生效",
+          fieldSelect("策略", "sStrat", s.selector_strategy || "pow2_least_load", [
+            { v: "pow2_least_load", l: "pow2_least_load" },
+            { v: "sticky", l: "sticky" },
+            { v: "random", l: "random" }
+          ]) +
+          field("热池大小", "sHot", s.hot_size) +
           field("单账号最大并发", "sMaxInf", s.max_inflight_per_account) +
           field("粘性 TTL 秒", "sSticky", s.sticky_ttl_sec) +
           field("粘性 LRU 容量", "sStickyMax", s.sticky_max) +
           field("Pow2 K", "sPow2", s.pow2_k) +
-          field("选号 failover 建议", "sSelAtt", s.selector_max_attempts) +
+          field("选号 failover", "sSelAtt", s.selector_max_attempts) +
           field("权重·优先级", "sWP", s.w_priority) +
-          field("权重·inflight 惩罚", "sWI", s.w_inflight) +
-          field("权重·失败惩罚", "sWF", s.w_failure) +
-          field("选号抖动幅度", "sJit", s.jitter_amp)
+          field("权重·inflight", "sWI", s.w_inflight) +
+          field("权重·失败", "sWF", s.w_failure) +
+          field("抖动幅度", "sJit", s.jitter_amp)
         );
-        html += section("租约 / 防封号冷却", "429 指数退避；403 可配置更长冷却与隔离",
+        html += section("租约 / 防封号冷却", "429 指数退避；401/402/403 冷却与隔离",
           field("Lease failover 次数", "sAtt", s.max_attempts) +
           field("429 冷却基数秒", "sCB", s.cooldown_base_sec) +
           field("冷却上限秒", "sCC", s.cooldown_cap_sec) +
@@ -689,36 +754,62 @@
           field("403 冷却秒", "sC403", s.forbidden_cooldown_sec) +
           field("403 隔离阈值(0=关)", "sQ403", s.forbidden_quarantine_after)
         );
-        html += section("进程限制", "全局并发立即生效；body/超时写入配置快照",
+        html += section("进程限制 / HTTP", "全局并发、Body、超时立即生效",
           field("全局最大并发", "sGlob", s.max_concurrent) +
           field("最大 Body 字节", "sBody", s.max_body_bytes) +
-          field("请求超时秒", "sTO", s.request_timeout_sec)
+          field("请求超时秒", "sTO", s.request_timeout_sec) +
+          fieldSelect("日志级别", "sLog", s.logging_level || "info", [
+            { v: "debug", l: "debug" }, { v: "info", l: "info" },
+            { v: "warn", l: "warn" }, { v: "error", l: "error" }
+          ])
         );
-        html += section("Token 刷新 workers", "QPS/Skew 热更新；worker 数仅影响后续逻辑",
-          field("Workers (2-4)", "sRW", s.refresh_workers) +
+        html += section("Token 刷新 workers", "QPS / Skew 热更新",
+          field("Workers", "sRW", s.refresh_workers) +
           field("Refresh QPS", "sRQ", s.refresh_qps) +
-          field("Skew 秒 (提前刷新)", "sRS", s.refresh_skew_sec)
+          field("Skew 秒", "sRS", s.refresh_skew_sec)
         );
         html += section("令牌创建默认模板", "仅影响管理台创建表单默认值",
           field("默认额度", "sTQ", s.token_default_remain_quota) +
           field("默认并发", "sTC", s.token_default_max_concurrent) +
           field("默认 RPM", "sTR", s.token_default_rpm) +
-          '<div><label>默认无限额度</label><select id="sTU" class="input">' +
-          '<option value="0"' + (!s.token_default_unlimited ? " selected" : "") + ">否</option>" +
-          '<option value="1"' + (s.token_default_unlimited ? " selected" : "") + ">是</option></select></div>"
+          fieldBool("默认无限额度", "sTU", !!s.token_default_unlimited)
         );
-        html += section("只读 · 进程/部署", "修改 listen/上游/密钥请改 runtime YAML 后重启",
-          ro("Listen", s.listen) +
-          ro("Allow public listen", s.allow_public_listen) +
-          ro("Data dir", s.data_dir) +
-          ro("DB path", s.db_path) +
-          ro("Mock upstream", s.mock_upstream) +
-          ro("Upstream base URL", s.upstream_base_url || "（空）") +
-          ro("OAuth refresh URL", s.oauth_refresh_url || "（默认/空）") +
-          ro("API key 已配置", s.api_key_configured) +
-          ro("Admin key 已配置", s.admin_key_configured) +
-          ro("日志级别", s.logging_level) +
-          ro("持久化路径", path)
+        html += section("导入 / SSO 转换", "限制热更；填 SSO endpoint+key 可热重建转换器",
+          fieldBool("启用导入", "sImpEn", !!s.import_enabled) +
+          field("最大上传字节", "sImpUp", s.import_max_upload_bytes) +
+          field("最大条目(默认1万)", "sImpEnt", s.import_max_entries) +
+          field("并发任务数", "sImpJobs", s.import_max_concurrent_jobs) +
+          field("解析 workers", "sImpW", s.import_workers) +
+          field("NDJSON 行上限", "sImpNd", s.import_max_ndjson_line_bytes) +
+          field("SSO 值上限", "sImpSsoB", s.import_max_sso_value_bytes) +
+          field("任务超时秒", "sImpTO", s.import_job_timeout_sec) +
+          field("Staging 过期秒", "sImpStale", s.import_staging_stale_after_sec) +
+          fieldBool("允许服务端路径", "sImpPath", !!s.import_allow_server_path) +
+          fieldText("SSO Endpoint", "sSsoEp", s.import_sso_endpoint || "", "https://…/v1/convert") +
+          fieldText("SSO API Key(留空不改)", "sSsoKey", "", s.import_sso_api_key_set ? "已配置 · 留空保持" : "未配置") +
+          field("SSO max_batch", "sSsoBatch", s.import_sso_max_batch) +
+          field("SSO timeout 秒", "sSsoTO", s.import_sso_timeout_sec) +
+          field("SSO workers", "sSsoW", s.import_sso_workers) +
+          fieldBool("SSO allow_insecure", "sSsoInsec", !!s.import_sso_allow_insecure)
+        );
+        html += section("Anthropic / 模型别名", "别名每行：claude-sonnet-4 = grok-4.5",
+          fieldBool("启用 Anthropic", "sAnEn", !!s.anthropic_enabled) +
+          fieldBool("剥离未知 betas", "sAnStrip", !!s.anthropic_strip_unknown_betas) +
+          fieldBool("count_tokens", "sAnCnt", !!s.anthropic_count_tokens) +
+          fieldText("透传前缀(逗号分隔)", "sAnPre", prefixesToText(s.anthropic_passthrough_prefixes), "grok-") +
+          fieldArea("模型别名映射", "sAnMap", aliasesToText(s.anthropic_model_aliases), 10)
+        );
+        html += section("部署 / 上游 / 密钥", "listen/data_dir/mock 等保存后可能需重启；密钥留空不改",
+          fieldText("Listen", "sListen", s.listen || "") +
+          fieldBool("Allow public listen", "sPub", !!s.allow_public_listen) +
+          fieldText("Data dir", "sData", s.data_dir || "") +
+          fieldText("DB path", "sDB", s.db_path || "") +
+          fieldBool("Mock upstream", "sMock", !!s.mock_upstream) +
+          fieldText("Upstream base URL", "sUp", s.upstream_base_url || "", "https://…/v1") +
+          fieldText("OAuth refresh URL", "sOAuth", s.oauth_refresh_url || "") +
+          fieldText("OAuth client_id", "sOAuthCID", s.oauth_client_id || "") +
+          fieldText("API Key(留空不改)", "sApiKey", "", s.api_key_configured ? "已配置" : "未配置") +
+          fieldText("Admin Key(留空不改)", "sAdmKey", "", s.admin_key_configured ? "已配置" : "未配置")
         );
         $("setForm").innerHTML = html;
         $("setPreview").textContent = JSON.stringify(s, null, 2);
@@ -735,16 +826,25 @@
     function num(id) {
       var el = $(id);
       if (!el) return 0;
-      return parseFloat(el.value);
+      var n = parseFloat(el.value);
+      return isNaN(n) ? 0 : n;
     }
     function numI(id) {
       var el = $(id);
       if (!el) return 0;
       return parseInt(el.value, 10) || 0;
     }
+    function str(id) {
+      var el = $(id);
+      return el ? String(el.value || "").trim() : "";
+    }
+    function bool(id) {
+      return str(id) === "1";
+    }
 
     $("saveSet").addEventListener("click", function () {
       var body = {
+        selector_strategy: str("sStrat"),
         hot_size: numI("sHot"),
         max_inflight_per_account: numI("sMaxInf"),
         sticky_ttl_sec: numI("sSticky"),
@@ -768,21 +868,57 @@
         max_concurrent: numI("sGlob"),
         max_body_bytes: numI("sBody"),
         request_timeout_sec: numI("sTO"),
+        logging_level: str("sLog"),
         refresh_workers: numI("sRW"),
         refresh_qps: num("sRQ"),
         refresh_skew_sec: numI("sRS"),
         token_default_remain_quota: numI("sTQ"),
         token_default_max_concurrent: numI("sTC"),
         token_default_rpm: numI("sTR"),
-        token_default_unlimited: $("sTU") && $("sTU").value === "1"
+        token_default_unlimited: bool("sTU"),
+        import_enabled: bool("sImpEn"),
+        import_max_upload_bytes: numI("sImpUp"),
+        import_max_entries: numI("sImpEnt"),
+        import_max_concurrent_jobs: numI("sImpJobs"),
+        import_workers: numI("sImpW"),
+        import_max_ndjson_line_bytes: numI("sImpNd"),
+        import_max_sso_value_bytes: numI("sImpSsoB"),
+        import_job_timeout_sec: numI("sImpTO"),
+        import_staging_stale_after_sec: numI("sImpStale"),
+        import_allow_server_path: bool("sImpPath"),
+        import_sso_endpoint: str("sSsoEp"),
+        import_sso_max_batch: numI("sSsoBatch"),
+        import_sso_timeout_sec: numI("sSsoTO"),
+        import_sso_workers: numI("sSsoW"),
+        import_sso_allow_insecure: bool("sSsoInsec"),
+        anthropic_enabled: bool("sAnEn"),
+        anthropic_strip_unknown_betas: bool("sAnStrip"),
+        anthropic_count_tokens: bool("sAnCnt"),
+        anthropic_passthrough_prefixes: textToPrefixes(str("sAnPre")),
+        anthropic_model_aliases: textToAliases(($("sAnMap") && $("sAnMap").value) || ""),
+        listen: str("sListen"),
+        allow_public_listen: bool("sPub"),
+        data_dir: str("sData"),
+        db_path: str("sDB"),
+        mock_upstream: bool("sMock"),
+        upstream_base_url: str("sUp"),
+        oauth_refresh_url: str("sOAuth"),
+        oauth_client_id: str("sOAuthCID")
       };
+      var ssoKey = str("sSsoKey");
+      if (ssoKey) body.import_sso_api_key = ssoKey;
+      var apiKey = str("sApiKey");
+      if (apiKey) body.api_key = apiKey;
+      var admKey = str("sAdmKey");
+      if (admKey) body.admin_key = admKey;
+
       var btn = $("saveSet");
       if (btn) btn.disabled = true;
       api("/admin/settings", { method: "PUT", body: body }).then(function (res) {
         var s = (res && res.settings) || body;
         window.__settings = s;
-        $("setPreview").textContent = JSON.stringify(s, null, 2);
         toast(res && res.persisted ? "参数已应用（已持久化）" : "参数已应用", true);
+        if (s.restart_hint) toast(s.restart_hint, false);
         load();
       }).catch(function (e) {
         if (handleAuthError(e)) return;
@@ -1536,14 +1672,17 @@
     stopPoll();
     setAuthed(true);
     $("main").innerHTML = wrapPage(
-      pageHd("系统配置", "只读安全视图 · 不含密钥明文", 
+      pageHd("系统配置", "只读安全视图 · 可编辑参数请到「设置」参数设计器",
+        '<button type="button" class="page-action-btn" id="cfgToSet">打开参数设计器</button>' +
         '<button type="button" class="page-action-btn" id="cfgRefresh">刷新</button>') +
       '<div class="panel"><pre id="cfg" class="mono">加载中…</pre></div>'
     );
     function load() {
-      api("/admin/config").then(function (c) {
+      Promise.all([api("/admin/config"), api("/admin/settings")]).then(function (arr) {
+        var c = arr[0] || {};
+        var s = arr[1] || {};
         var pre = $("cfg");
-        if (pre) pre.textContent = JSON.stringify(c, null, 2);
+        if (pre) pre.textContent = JSON.stringify({ config: c, settings: s }, null, 2);
       }).catch(function (e) {
         if (handleAuthError(e)) return;
         var pre = $("cfg");
@@ -1552,6 +1691,7 @@
       });
     }
     $("cfgRefresh").addEventListener("click", load);
+    $("cfgToSet").addEventListener("click", function () { location.hash = "#/settings"; });
     load();
   }
 

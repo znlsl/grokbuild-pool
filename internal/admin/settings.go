@@ -16,9 +16,11 @@ import (
 	"github.com/yshgsh1343/grokbuild2api/internal/selector"
 )
 
-// RuntimeSettings 管理台可编辑的全部运行参数（密钥类仅显示是否已配置，不明文回传）。
+// RuntimeSettings 管理台可编辑的全部运行参数。
+// 能热更的即时生效；需重启的字段仍持久化到 settings.json 供下次启动/运维参考。
 type RuntimeSettings struct {
 	// —— 选号 / 热池 ——
+	SelectorStrategy      string  `json:"selector_strategy"`
 	HotSize               int     `json:"hot_size"`
 	MaxInflightPerAccount int32   `json:"max_inflight_per_account"`
 	StickyTTLSec          int64   `json:"sticky_ttl_sec"`
@@ -58,7 +60,33 @@ type RuntimeSettings struct {
 	TokenDefaultRPM           int   `json:"token_default_rpm"`
 	TokenDefaultUnlimited     bool  `json:"token_default_unlimited"`
 
-	// —— 只读展示（来自进程配置，热更不改绑定/密钥）——
+	// —— 导入（热更限制；SSO endpoint/key 写盘供运维，连接器热更需 endpoint+key）——
+	ImportEnabled              bool   `json:"import_enabled"`
+	ImportMaxUploadBytes       int64  `json:"import_max_upload_bytes"`
+	ImportMaxEntries           int    `json:"import_max_entries"`
+	ImportMaxConcurrentJobs    int    `json:"import_max_concurrent_jobs"`
+	ImportWorkers              int    `json:"import_workers"`
+	ImportMaxNDJSONLineBytes   int    `json:"import_max_ndjson_line_bytes"`
+	ImportMaxSSOValueBytes     int    `json:"import_max_sso_value_bytes"`
+	ImportJobTimeoutSec        int    `json:"import_job_timeout_sec"`
+	ImportStagingStaleAfterSec int    `json:"import_staging_stale_after_sec"`
+	ImportAllowServerPath      bool   `json:"import_allow_server_path"`
+	ImportSSOEndpoint          string `json:"import_sso_endpoint"`
+	ImportSSOAPIKeySet         bool   `json:"import_sso_api_key_set"` // 只读展示
+	ImportSSOAPIKey            string `json:"import_sso_api_key,omitempty"` // 仅 PUT 写入，GET 不回传明文
+	ImportSSOMaxBatch          int    `json:"import_sso_max_batch"`
+	ImportSSOTimeoutSec        int    `json:"import_sso_timeout_sec"`
+	ImportSSOAllowInsecure     bool   `json:"import_sso_allow_insecure"`
+	ImportSSOWorkers           int    `json:"import_sso_workers"`
+
+	// —— Anthropic / 模型别名（热更）——
+	AnthropicEnabled             bool              `json:"anthropic_enabled"`
+	AnthropicStripUnknownBetas   bool              `json:"anthropic_strip_unknown_betas"`
+	AnthropicCountTokens         bool              `json:"anthropic_count_tokens"`
+	AnthropicPassthroughPrefixes []string          `json:"anthropic_passthrough_prefixes"`
+	AnthropicModelAliases        map[string]string `json:"anthropic_model_aliases"`
+
+	// —— 部署 / 上游（可编辑并落盘；listen 等绑定需重启才真正换端口）——
 	Listen             string `json:"listen"`
 	AllowPublicListen  bool   `json:"allow_public_listen"`
 	DataDir            string `json:"data_dir"`
@@ -66,9 +94,16 @@ type RuntimeSettings struct {
 	MockUpstream       bool   `json:"mock_upstream"`
 	UpstreamBaseURL    string `json:"upstream_base_url"`
 	OAuthRefreshURL    string `json:"oauth_refresh_url"`
+	OAuthClientID      string `json:"oauth_client_id"`
 	APIKeyConfigured   bool   `json:"api_key_configured"`
 	AdminKeyConfigured bool   `json:"admin_key_configured"`
-	LoggingLevel       string `json:"logging_level"`
+	// 可选写入新密钥（GET 永不回传明文）
+	APIKey   string `json:"api_key,omitempty"`
+	AdminKey string `json:"admin_key,omitempty"`
+	LoggingLevel string `json:"logging_level"`
+
+	// RestartHint 非空时提示哪些变更需重启
+	RestartHint string `json:"restart_hint,omitempty"`
 }
 
 // SettingsSnapshot 为 GET 响应：运行时设置 + 可选持久化路径。
@@ -78,7 +113,7 @@ type SettingsSnapshot struct {
 	PersistedPath string `json:"persisted_path,omitempty"`
 }
 
-// SettingsController 持有可变运行时参数并应用到 hot/lease。
+// SettingsController 持有可变运行时参数并应用到 hot/lease/import/anthropic。
 type SettingsController struct {
 	mu sync.RWMutex
 	s  RuntimeSettings
@@ -96,16 +131,81 @@ type SettingsController struct {
 	SetMaxBodyBytes func(n int64)
 	// SetRequestTimeout 可选：热更新整请求超时（0 = 不设）
 	SetRequestTimeout func(d time.Duration)
-	// ProcessInfo 进程只读信息，每次 Apply 末尾强制盖写（避免 JSON 零值/客户端 PUT 冲掉）
+	// ApplyImport 可选：热更新导入限制（含 SSO 转换器）
+	ApplyImport func(in RuntimeSettings) error
+	// ApplyAnthropic 可选：热更新 Anthropic 别名/开关
+	ApplyAnthropic func(in RuntimeSettings)
+	// storedAPIKey / storedAdminKey 仅内存持有明文（GET 不回传）
+	storedAPIKey   string
+	storedAdminKey string
+	// ProcessInfo 进程启动时的绑定信息（listen 等）；密钥类以配置为准
 	ProcessInfo RuntimeSettings
+	// lastSSOAPIKey 仅内存，供 ApplyImport 在 PUT 未传新 key 时复用
+	lastSSOAPIKey string
+}
+
+// SeedSecrets 启动时注入配置文件中的密钥（不落盘、GET 不回传）。
+func (c *SettingsController) SeedSecrets(apiKey, adminKey, ssoAPIKey string) {
+	if c == nil {
+		return
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if strings.TrimSpace(apiKey) != "" {
+		c.storedAPIKey = strings.TrimSpace(apiKey)
+	}
+	if strings.TrimSpace(adminKey) != "" {
+		c.storedAdminKey = strings.TrimSpace(adminKey)
+	}
+	if strings.TrimSpace(ssoAPIKey) != "" {
+		c.lastSSOAPIKey = strings.TrimSpace(ssoAPIKey)
+	}
+}
+
+// PeekSSOAPIKey 返回当前内存中的 SSO API key（供 ApplyImport 使用）。
+func (c *SettingsController) PeekSSOAPIKey() string {
+	if c == nil {
+		return ""
+	}
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	return c.lastSSOAPIKey
+}
+
+// PeekAdminKey 返回当前内存中的 admin key（供鉴权热更新）。
+func (c *SettingsController) PeekAdminKey() string {
+	if c == nil {
+		return ""
+	}
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	return c.storedAdminKey
+}
+
+// PeekAPIKey 返回当前内存中的静态 API key。
+func (c *SettingsController) PeekAPIKey() string {
+	if c == nil {
+		return ""
+	}
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	return c.storedAPIKey
 }
 
 // Snapshot 返回当前设置副本（含可选 PersistedPath）。
+// 永不回传 api_key / admin_key / import_sso_api_key 明文。
 func (c *SettingsController) Snapshot() SettingsSnapshot {
 	c.mu.RLock()
 	defer c.mu.RUnlock()
+	out := c.s
+	out.APIKey = ""
+	out.AdminKey = ""
+	out.ImportSSOAPIKey = ""
+	out.APIKeyConfigured = strings.TrimSpace(c.storedAPIKey) != "" || c.ProcessInfo.APIKeyConfigured
+	out.AdminKeyConfigured = strings.TrimSpace(c.storedAdminKey) != "" || c.ProcessInfo.AdminKeyConfigured
+	out.ImportSSOAPIKeySet = strings.TrimSpace(out.ImportSSOEndpoint) != "" && (out.ImportSSOAPIKeySet || c.ProcessInfo.ImportSSOAPIKeySet)
 	return SettingsSnapshot{
-		RuntimeSettings: c.s,
+		RuntimeSettings: out,
 		PersistedPath:   c.Path,
 	}
 }
@@ -148,6 +248,10 @@ func (c *SettingsController) persist() error {
 	c.mu.RLock()
 	snap := c.s
 	c.mu.RUnlock()
+	// 落盘绝不写密钥明文
+	snap.APIKey = ""
+	snap.AdminKey = ""
+	snap.ImportSSOAPIKey = ""
 
 	data, err := json.MarshalIndent(snap, "", "  ")
 	if err != nil {
@@ -260,8 +364,23 @@ func (c *SettingsController) Apply(in RuntimeSettings) (RuntimeSettings, error) 
 	if in.RequestTimeoutSec < 0 {
 		in.RequestTimeoutSec = 0
 	}
-	// 保留只读展示字段：从旧快照合并（避免 PUT 丢 listen 等）
+	// 与旧快照合并：空字段保留原值（全量表单 PUT 也会带齐；兼容部分字段）
 	prev := c.Snapshot().RuntimeSettings
+	c.mu.Lock()
+	prevStoredAPI := c.storedAPIKey
+	prevStoredAdmin := c.storedAdminKey
+	pi := c.ProcessInfo
+	c.mu.Unlock()
+
+	if in.SelectorStrategy == "" {
+		in.SelectorStrategy = prev.SelectorStrategy
+		if in.SelectorStrategy == "" {
+			in.SelectorStrategy = "pow2_least_load"
+		}
+	}
+	if in.HotSize <= 0 {
+		in.HotSize = prev.HotSize
+	}
 	if in.Listen == "" {
 		in.Listen = prev.Listen
 	}
@@ -271,40 +390,128 @@ func (c *SettingsController) Apply(in RuntimeSettings) (RuntimeSettings, error) 
 	if in.DBPath == "" {
 		in.DBPath = prev.DBPath
 	}
-	if in.UpstreamBaseURL == "" && prev.UpstreamBaseURL != "" {
-		in.UpstreamBaseURL = prev.UpstreamBaseURL
-	}
-	if in.OAuthRefreshURL == "" && prev.OAuthRefreshURL != "" {
-		in.OAuthRefreshURL = prev.OAuthRefreshURL
-	}
 	if in.LoggingLevel == "" {
 		in.LoggingLevel = prev.LoggingLevel
 	}
-	c.mu.Lock()
-	// 强制盖写进程只读信息
-	pi := c.ProcessInfo
-	c.mu.Unlock()
-	if pi.Listen != "" {
-		in.Listen = pi.Listen
+	if in.OAuthClientID == "" {
+		in.OAuthClientID = prev.OAuthClientID
 	}
-	in.AllowPublicListen = pi.AllowPublicListen
-	if pi.DataDir != "" {
-		in.DataDir = pi.DataDir
+	if in.ImportMaxUploadBytes <= 0 {
+		in.ImportMaxUploadBytes = prev.ImportMaxUploadBytes
 	}
-	if pi.DBPath != "" {
-		in.DBPath = pi.DBPath
+	if in.ImportMaxEntries <= 0 {
+		in.ImportMaxEntries = prev.ImportMaxEntries
 	}
-	in.MockUpstream = pi.MockUpstream
-	in.UpstreamBaseURL = pi.UpstreamBaseURL
-	in.OAuthRefreshURL = pi.OAuthRefreshURL
-	in.APIKeyConfigured = pi.APIKeyConfigured
-	in.AdminKeyConfigured = pi.AdminKeyConfigured
-	if pi.LoggingLevel != "" {
-		in.LoggingLevel = pi.LoggingLevel
+	if in.ImportMaxConcurrentJobs <= 0 {
+		in.ImportMaxConcurrentJobs = prev.ImportMaxConcurrentJobs
 	}
+	if in.ImportWorkers <= 0 {
+		in.ImportWorkers = prev.ImportWorkers
+	}
+	if in.ImportMaxNDJSONLineBytes <= 0 {
+		in.ImportMaxNDJSONLineBytes = prev.ImportMaxNDJSONLineBytes
+	}
+	if in.ImportMaxSSOValueBytes <= 0 {
+		in.ImportMaxSSOValueBytes = prev.ImportMaxSSOValueBytes
+	}
+	if in.ImportJobTimeoutSec <= 0 {
+		in.ImportJobTimeoutSec = prev.ImportJobTimeoutSec
+	}
+	if in.ImportStagingStaleAfterSec <= 0 {
+		in.ImportStagingStaleAfterSec = prev.ImportStagingStaleAfterSec
+	}
+	if in.ImportSSOEndpoint == "" {
+		in.ImportSSOEndpoint = prev.ImportSSOEndpoint
+	}
+	if in.ImportSSOMaxBatch <= 0 {
+		in.ImportSSOMaxBatch = prev.ImportSSOMaxBatch
+	}
+	if in.ImportSSOTimeoutSec <= 0 {
+		in.ImportSSOTimeoutSec = prev.ImportSSOTimeoutSec
+	}
+	if in.ImportSSOWorkers <= 0 {
+		in.ImportSSOWorkers = prev.ImportSSOWorkers
+	}
+	if len(in.AnthropicModelAliases) == 0 && len(prev.AnthropicModelAliases) > 0 {
+		in.AnthropicModelAliases = prev.AnthropicModelAliases
+	}
+	if len(in.AnthropicPassthroughPrefixes) == 0 && len(prev.AnthropicPassthroughPrefixes) > 0 {
+		in.AnthropicPassthroughPrefixes = prev.AnthropicPassthroughPrefixes
+	}
+
+	// 密钥：空表示不改；非空则更新内存持有
+	newAPI := strings.TrimSpace(in.APIKey)
+	newAdmin := strings.TrimSpace(in.AdminKey)
+	newSSOKey := strings.TrimSpace(in.ImportSSOAPIKey)
+	in.APIKey = ""
+	in.AdminKey = ""
+	in.ImportSSOAPIKey = ""
+
+	// 导入数值边界
+	if in.ImportMaxUploadBytes > 256<<20 {
+		in.ImportMaxUploadBytes = 256 << 20
+	}
+	if in.ImportMaxEntries > 100_000 {
+		in.ImportMaxEntries = 100_000
+	}
+	if in.ImportMaxConcurrentJobs > 8 {
+		in.ImportMaxConcurrentJobs = 8
+	}
+	if in.ImportWorkers > 16 {
+		in.ImportWorkers = 16
+	}
+	if in.ImportSSOMaxBatch > 100 {
+		in.ImportSSOMaxBatch = 100
+	}
+	if in.ImportSSOWorkers > 16 {
+		in.ImportSSOWorkers = 16
+	}
+
+	// 重启提示：端口/数据路径/mock 切换
+	var restart []string
+	if pi.Listen != "" && in.Listen != "" && in.Listen != pi.Listen {
+		restart = append(restart, "listen")
+	}
+	if pi.DataDir != "" && in.DataDir != "" && in.DataDir != pi.DataDir {
+		restart = append(restart, "data_dir")
+	}
+	if pi.DBPath != "" && in.DBPath != "" && in.DBPath != pi.DBPath {
+		restart = append(restart, "db_path")
+	}
+	if in.MockUpstream != pi.MockUpstream {
+		restart = append(restart, "mock_upstream")
+	}
+	if in.UpstreamBaseURL != pi.UpstreamBaseURL {
+		restart = append(restart, "upstream_base_url")
+	}
+	if len(restart) > 0 {
+		in.RestartHint = "以下字段已保存，需重启进程后完全生效: " + strings.Join(restart, ", ")
+	} else {
+		in.RestartHint = ""
+	}
+
+	// 密钥配置标志
+	storedAPI := prevStoredAPI
+	if newAPI != "" {
+		storedAPI = newAPI
+	}
+	storedAdmin := prevStoredAdmin
+	if newAdmin != "" {
+		storedAdmin = newAdmin
+	}
+	in.APIKeyConfigured = strings.TrimSpace(storedAPI) != "" || pi.APIKeyConfigured
+	in.AdminKeyConfigured = strings.TrimSpace(storedAdmin) != "" || pi.AdminKeyConfigured
+	in.ImportSSOAPIKeySet = strings.TrimSpace(in.ImportSSOEndpoint) != "" && (newSSOKey != "" || prev.ImportSSOAPIKeySet || pi.ImportSSOAPIKeySet)
 
 	c.mu.Lock()
 	c.s = in
+	if newAPI != "" {
+		c.storedAPIKey = newAPI
+	}
+	if newAdmin != "" {
+		c.storedAdminKey = newAdmin
+	}
+	// 把 SSO key 暂存在 ProcessInfo 旁路字段不合适；经 ApplyImport 回调传入
 	c.mu.Unlock()
 
 	// 即时生效：账号 inflight 硬限
@@ -326,9 +533,12 @@ func (c *SettingsController) Apply(in RuntimeSettings) (RuntimeSettings, error) 
 		lc.CooldownExpMax = in.CooldownExpMax
 		c.Lease.ApplyConfig(lc)
 	}
-	// 即时生效：选号权重 / sticky
+	// 即时生效：选号权重 / sticky / strategy
 	if c.Selector != nil {
 		sc := c.Selector.Config()
+		if in.SelectorStrategy != "" {
+			sc.Strategy = in.SelectorStrategy
+		}
 		sc.HotSize = in.HotSize
 		sc.StickyTTLSec = in.StickyTTLSec
 		sc.StickyMax = in.StickyMax
@@ -362,12 +572,37 @@ func (c *SettingsController) Apply(in RuntimeSettings) (RuntimeSettings, error) 
 	if c.SetRequestTimeout != nil {
 		c.SetRequestTimeout(time.Duration(in.RequestTimeoutSec) * time.Second)
 	}
+	// 导入 + Anthropic
+	if c.ApplyAnthropic != nil {
+		c.ApplyAnthropic(in)
+	}
+	if c.ApplyImport != nil {
+		// 把本次新 SSO key 临时塞回（不落 JSON 明文时可在回调内使用后丢弃）
+		pass := in
+		pass.ImportSSOAPIKey = newSSOKey
+		if err := c.ApplyImport(pass); err != nil {
+			return in, err
+		}
+		// 成功后标记已配置
+		if newSSOKey != "" {
+			c.mu.Lock()
+			c.s.ImportSSOAPIKeySet = true
+			c.lastSSOAPIKey = newSSOKey
+			c.mu.Unlock()
+			in.ImportSSOAPIKeySet = true
+		}
+	}
 
 	// 成功后原子落盘（失败不回滚内存，但返回错误以便调用方感知）
 	if err := c.persist(); err != nil {
 		return in, err
 	}
-	return in, nil
+	// 返回给客户端的快照去掉密钥
+	out := in
+	out.APIKey = ""
+	out.AdminKey = ""
+	out.ImportSSOAPIKey = ""
+	return out, nil
 }
 
 // GetSettings GET /admin/settings
