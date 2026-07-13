@@ -131,9 +131,13 @@ export function renderImportJobs() {
         var sizeHint = (!importMaxUpload || importMaxUpload <= 0)
           ? "不限体积"
           : ("体积兜底 " + Math.round(importMaxUpload / 1048576) + " MiB");
+        var en = limits.enabled;
+        if (en === undefined || en === null) en = true;
         note.textContent = "默认 SSO→JSON · 最多 " + importMaxEntries +
-          " 条 · " + sizeHint + " · 可多选文件（每个文件一个任务） · 转换器" +
-          (limits.sso_converter_configured ? "已就绪（内置 Go Device Flow，支持实时进度）" : "未就绪");
+          " 条 · " + sizeHint + " · 可多选文件（每个文件一个任务） · 导入" +
+          (en ? "已启用" : "已关闭（设置页打开 import_enabled）") +
+          " · 转换器" +
+          (limits.sso_converter_configured ? "已就绪（内置 Go Device Flow）" : "未就绪");
       }
       renderActive(list);
       var host = $("impTable");
@@ -208,10 +212,15 @@ export function renderImportJobs() {
 
   function importErrorMessage(e) {
     if (!e) return "提交失败";
-    if (e.status === 413) return "文件超过上传大小限制";
-    if (e.status === 429) return "导入任务已满，请稍后重试";
-    if (e.status === 503) return "SSO 转换器未配置或导入服务不可用";
-    return e.message || "提交失败";
+    // 优先展示后端明确文案（如「导入任务未启用」「SSO 转换器未配置」）
+    var msg = (e.message && String(e.message).trim()) || "";
+    if (e.status === 413) return msg || "文件超过上传大小限制";
+    if (e.status === 429) return msg || "导入任务已满，请稍后重试";
+    if (e.status === 503) {
+      if (msg && msg !== ("HTTP " + e.status)) return msg;
+      return "导入服务不可用（可能未启用导入，或 SSO 转换器未配置）";
+    }
+    return msg || "提交失败";
   }
 
   function submitOneImport(file, format) {

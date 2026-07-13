@@ -23,6 +23,7 @@ func (h *Handlers) ListImportJobs(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{
 		"jobs": list,
 		"limits": map[string]any{
+			"enabled":                  h.importEnabled(),
 			"max_upload_bytes":         h.effectiveImportMaxUploadBytes(),
 			"max_entries":              h.effectiveImportMaxEntries(),
 			"sso_converter_configured": h.ssoConverterConfigured(),
