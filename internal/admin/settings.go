@@ -496,7 +496,7 @@ func (c *SettingsController) Apply(in RuntimeSettings) (RuntimeSettings, error) 
 		restart = append(restart, "refresh_workers")
 	}
 	if len(restart) > 0 {
-		in.RestartHint = "以下字段已保存，需重启进程后完全生效: " + strings.Join(restart, ", ")
+		in.RestartHint = "以下字段已保存，但需手动重启进程后才完全生效（服务不会自动重启）: " + strings.Join(restart, ", ")
 	} else {
 		in.RestartHint = ""
 	}

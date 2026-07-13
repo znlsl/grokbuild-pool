@@ -556,7 +556,7 @@
           esc(s.title) + "</button>";
       }).join("") + "</nav>";
     $("main").innerHTML = wrapPage(
-      pageHd("参数设计器", "全部运行参数均可在此编辑 · 热更新即时生效 · 密钥字段留空表示不修改",
+      pageHd("参数设计器", "手动「保存并应用」后写入；多数项即时热更 · 标注「需重启」的项不会自动重启进程 · 密钥留空表示不修改",
         '<button type="button" class="page-action-btn" id="reloadSet">重新加载</button>' +
         '<button type="button" class="page-action-btn-primary" id="saveSet">保存并应用</button>') +
       subnav +
@@ -632,20 +632,21 @@
         if (hint) {
           if (s.restart_hint) {
             hint.innerHTML = '<div class="err-box" style="border-color:var(--color-warning,#c90)">' +
-              esc(s.restart_hint) + "</div>";
+              esc(s.restart_hint) +
+              '<div class="muted" style="margin-top:6px">提示：管理台不会自动重启服务；请在维护窗口手动重启容器/进程。</div></div>';
           } else {
             hint.innerHTML = '<p class="muted">持久化：' + esc(path) +
-              " · 密钥 / SSO key 留空=不改 · GET 永不回传明文</p>";
+              " · 点「保存并应用」才会写入 · 无自动保存 · 密钥 / SSO key 留空=不改</p>";
           }
         }
         var html = "";
-        html += section("sel", "选号 / 热池", "pow2 / sticky / 权重即时生效",
+        html += section("sel", "选号 / 热池", "策略/权重/粘性即时生效；热池大小变更仅落盘，需重启后扩容",
           fieldSelect("策略", "sStrat", s.selector_strategy || "pow2_least_load", [
             { v: "pow2_least_load", l: "pow2_least_load" },
             { v: "sticky", l: "sticky" },
             { v: "random", l: "random" }
           ]) +
-          field("热池大小", "sHot", s.hot_size) +
+          field("热池大小（需重启）", "sHot", s.hot_size) +
           field("单账号最大并发", "sMaxInf", s.max_inflight_per_account) +
           field("粘性 TTL 秒", "sSticky", s.sticky_ttl_sec) +
           field("粘性 LRU 容量", "sStickyMax", s.sticky_max) +
@@ -677,8 +678,8 @@
             { v: "warn", l: "warn" }, { v: "error", l: "error" }
           ])
         );
-        html += section("refresh", "Token 刷新 workers", "QPS / Skew 热更新",
-          field("Workers", "sRW", s.refresh_workers) +
+        html += section("refresh", "Token 刷新 workers", "QPS / Skew 保存后即时生效；Workers 数量仅落盘，需重启后调整",
+          field("Workers（需重启）", "sRW", s.refresh_workers) +
           field("Refresh QPS", "sRQ", s.refresh_qps) +
           field("Skew 秒", "sRS", s.refresh_skew_sec)
         );
@@ -713,7 +714,7 @@
           fieldText("透传前缀(逗号分隔)", "sAnPre", prefixesToText(s.anthropic_passthrough_prefixes), "grok-") +
           fieldArea("模型别名映射", "sAnMap", aliasesToText(s.anthropic_model_aliases), 10)
         );
-        html += section("deploy", "部署 / 上游 / 密钥", "listen/data_dir/mock 等保存后可能需重启；密钥留空不改",
+        html += section("deploy", "部署 / 上游 / 密钥", "listen/data_dir/mock/upstream 等保存后仅落盘，需手动重启进程；密钥留空不改",
           fieldText("Listen", "sListen", s.listen || "") +
           fieldBool("Allow public listen", "sPub", !!s.allow_public_listen) +
           fieldText("Data dir", "sData", s.data_dir || "") +
@@ -831,8 +832,14 @@
       api("/admin/settings", { method: "PUT", body: body }).then(function (res) {
         var s = (res && res.settings) || body;
         window.__settings = s;
-        toast(res && res.persisted ? "参数已应用（已持久化）" : "参数已应用", true);
-        if (s.restart_hint) toast(s.restart_hint, false);
+        var persisted = !!(res && res.persisted);
+        var hint = (s && s.restart_hint) || "";
+        if (hint) {
+          toast((persisted ? "已保存。" : "已应用。") + hint, false);
+        } else {
+          toast(persisted ? "已保存并热更新（无需重启）" : "已热更新（无需重启）", true);
+        }
+        // 仅重新拉取表单展示服务端状态，不会重启进程
         load();
       }).catch(function (e) {
         if (handleAuthError(e)) return;
