@@ -321,13 +321,27 @@ score = w_priority * priority
 
 ---
 
-### 10. 令牌创建默认模板（仅管理台表单默认）
+### 10. 客户端令牌额度 / 并发 / RPM
+
+发放的 `sk-` 令牌在请求路径上独立闸门（与全局 `limits.max_concurrent`、单账号 `max_inflight_per_account` 叠加）：
+
+| 字段 | 默认 | 说明 |
+|---|---:|---|
+| `max_concurrent` | 创建时用模板，默认 `5` | 单令牌 in-flight 硬顶；`0` = 不限；超限 `503`「令牌并发已满」 |
+| `rpm` | `0` | 每分钟请求上限；`0` = 不限；超限 `503`「令牌 RPM 已达上限」 |
+| `remain_quota` / `unlimited_quota` | 见模板 | 额度预扣 + 按 usage 结算 |
+
+- **创建**：`POST /admin/tokens` 指针语义——JSON 里显式 `"max_concurrent": 0` 表示不限，**不会**被默认模板盖成 5；未传字段才用模板。
+- **修改**：`PATCH /admin/tokens/{id}` 可改 `name` / `max_concurrent` / `rpm` / `remain_quota` / `unlimited_quota` / `enabled`；**下一请求立即生效**（在途请求不中断）。列表接口回 `inflight` 实时占用。
+- **管理台**：令牌页可创建，也可点「编辑」改并发/RPM/额度后保存。
+
+#### 令牌创建默认模板（仅管理台表单 / 未传字段）
 
 | 管理台 JSON | 默认 | 生效方式 | 说明 |
 |---|---:|---|---|
-| `token_default_remain_quota` | `1000` | 热更 | 默认额度 |
-| `token_default_max_concurrent` | `5` | 热更 | 默认每令牌并发 |
-| `token_default_rpm` | `0` | 热更 | `0` = 不限 RPM |
+| `token_default_remain_quota` | `1000` | 热更 | 默认额度（创建时未传 `remain_quota`） |
+| `token_default_max_concurrent` | `5` | 热更 | 默认每令牌并发（创建时未传 `max_concurrent`）；`0` = 默认不限 |
+| `token_default_rpm` | `0` | 热更 | 默认 RPM；`0` = 不限 |
 | `token_default_unlimited` | `false` | 热更 | 默认是否无限额度 |
 
 ---

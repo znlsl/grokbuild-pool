@@ -17,14 +17,23 @@ import (
 )
 
 var (
-	ErrNotFound      = errors.New("clients: token not found")
-	ErrDisabled      = errors.New("clients: token disabled")
-	ErrExpired       = errors.New("clients: token expired")
-	ErrQuotaExceeded = errors.New("clients: quota exceeded")
-	ErrUnauthorized  = errors.New("clients: invalid api key")
+	ErrNotFound         = errors.New("clients: token not found")
+	ErrDisabled         = errors.New("clients: token disabled")
+	ErrExpired          = errors.New("clients: token expired")
+	ErrQuotaExceeded    = errors.New("clients: quota exceeded")
+	ErrUnauthorized     = errors.New("clients: invalid api key")
+	ErrConcurrencyLimit = errors.New("clients: token concurrency limit")
+	ErrRPMLimit         = errors.New("clients: token rpm limit")
 )
 
 // Store SQLite 令牌库 + 进程内并发/RPM 闸门。
+//
+// 并发闸门语义：
+//   - inflight 对所有令牌始终计数（含 max_concurrent=0 的「不限」令牌）
+//   - max_concurrent>0 且 inflight>=max → 拒绝（ErrConcurrencyLimit）
+//   - max_concurrent==0 → 不硬限（仍受全局 limits.max_concurrent 约束）
+//   - PATCH 改 max_concurrent 后，Authenticate 每次读库，下一请求即用新值
+//   - ReleaseSlot 始终减计数，与 Acquire 时的 max 无关（避免改限额后泄漏）
 type Store struct {
 	db *sql.DB
 	mu sync.Mutex // serializes writes; matches catalog single-writer style
@@ -102,6 +111,8 @@ CREATE INDEX IF NOT EXISTS idx_tokens_enabled ON api_tokens(enabled);
 	}
 
 	// Create 发放一把或多把令牌；明文仅在此返回，不写入 key_plain。
+// 指针字段 nil 按 0/false 落库；默认模板合并在 admin.CreateTokens 完成。
+// 显式传 0 表示「不限」，不会被默认值覆盖。
 func (s *Store) Create(req CreateRequest) ([]CreateResult, error) {
 	if s == nil {
 		return nil, fmt.Errorf("clients: nil store")
@@ -116,6 +127,31 @@ func (s *Store) Create(req CreateRequest) ([]CreateResult, error) {
 	name := strings.TrimSpace(req.Name)
 	if name == "" {
 		name = "token"
+	}
+	remain := int64(0)
+	if req.RemainQuota != nil {
+		if *req.RemainQuota < 0 {
+			return nil, fmt.Errorf("clients: remain_quota < 0")
+		}
+		remain = *req.RemainQuota
+	}
+	unlim := false
+	if req.UnlimitedQuota != nil {
+		unlim = *req.UnlimitedQuota
+	}
+	maxConc := 0
+	if req.MaxConcurrent != nil {
+		if *req.MaxConcurrent < 0 {
+			return nil, fmt.Errorf("clients: max_concurrent < 0")
+		}
+		maxConc = *req.MaxConcurrent
+	}
+	rpm := 0
+	if req.RPM != nil {
+		if *req.RPM < 0 {
+			return nil, fmt.Errorf("clients: rpm < 0")
+		}
+		rpm = *req.RPM
 	}
 	now := nowUnix()
 	out := make([]CreateResult, 0, n)
@@ -138,8 +174,8 @@ func (s *Store) Create(req CreateRequest) ([]CreateResult, error) {
 		}
 		t := Token{
 			ID: id, Name: itemName, KeyPrefix: prefix, KeyHash: hash, APIKey: plain,
-			Enabled: true, RemainQuota: req.RemainQuota, UnlimitedQuota: req.UnlimitedQuota,
-			MaxConcurrent: req.MaxConcurrent, RPM: req.RPM, ExpiresAt: req.ExpiresAt,
+			Enabled: true, RemainQuota: remain, UnlimitedQuota: unlim,
+			MaxConcurrent: maxConc, RPM: rpm, ExpiresAt: req.ExpiresAt,
 			CreatedAt: now, UpdatedAt: now,
 		}
 		_, err = tx.Exec(`INSERT INTO api_tokens(
@@ -160,6 +196,7 @@ used_quota,request_count,expires_at,created_at,updated_at,last_used_at
 }
 
 // List 按创建时间倒序列出（不含明文密钥；仅 key_prefix 可供识别）。
+// Inflight 从进程内闸门填充，便于管理台展示「当前占用/上限」。
 func (s *Store) List(limit int) ([]Token, error) {
 	if limit <= 0 || limit > 500 {
 		limit = 100
@@ -184,8 +221,29 @@ FROM api_tokens ORDER BY created_at DESC LIMIT ?`, limit)
 		t.APIKey = "" // 永不从库回读明文
 		out = append(out, t)
 	}
-	return out, rows.Err()
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	s.gateMu.Lock()
+	for i := range out {
+		out[i].Inflight = s.inflight[out[i].ID]
+	}
+	s.gateMu.Unlock()
+	return out, nil
 }
+
+// Get 按 id 取令牌（含实时 inflight）。
+func (s *Store) Get(id string) (Token, error) {
+	s.mu.Lock()
+	t, err := s.getByID(id)
+	s.mu.Unlock()
+	if err != nil {
+		return Token{}, err
+	}
+	t.Inflight = s.CurrentInflight(id)
+	return t, nil
+}
+
 // Delete 按 id 删除令牌。
 func (s *Store) Delete(id string) error {
 	s.mu.Lock()
@@ -198,6 +256,10 @@ func (s *Store) Delete(id string) error {
 	if n == 0 {
 		return ErrNotFound
 	}
+	s.gateMu.Lock()
+	delete(s.inflight, id)
+	delete(s.rpmWin, id)
+	s.gateMu.Unlock()
 	return nil
 }
 
@@ -253,6 +315,12 @@ func (s *Store) DeleteMany(ids []string) (int, error) {
 	if err := tx.Commit(); err != nil {
 		return 0, err
 	}
+	s.gateMu.Lock()
+	for _, id := range clean {
+		delete(s.inflight, id)
+		delete(s.rpmWin, id)
+	}
+	s.gateMu.Unlock()
 	return deleted, nil
 }
 
@@ -271,28 +339,75 @@ func (s *Store) SetEnabled(id string, enabled bool) error {
 	return nil
 }
 
-// PatchQuota 更新额度/并发/RPM。
-func (s *Store) PatchQuota(id string, remain *int64, unlimited *bool, maxConc *int, rpm *int) error {
+// Patch 更新令牌可编辑字段。指针 nil = 不改；非 nil（含 0/false）即写入。
+// 改 max_concurrent/rpm 后下一请求 Authenticate 读库即生效；不中断在途请求。
+func (s *Store) Patch(id string, req PatchRequest) (Token, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	t, err := s.getByID(id)
 	if err != nil {
-		return err
+		return Token{}, err
 	}
-	if remain != nil {
-		t.RemainQuota = *remain
+	if req.Name != nil {
+		name := strings.TrimSpace(*req.Name)
+		if name == "" {
+			return Token{}, fmt.Errorf("clients: name empty")
+		}
+		t.Name = name
 	}
-	if unlimited != nil {
-		t.UnlimitedQuota = *unlimited
+	if req.RemainQuota != nil {
+		if *req.RemainQuota < 0 {
+			return Token{}, fmt.Errorf("clients: remain_quota < 0")
+		}
+		t.RemainQuota = *req.RemainQuota
 	}
-	if maxConc != nil {
-		t.MaxConcurrent = *maxConc
+	if req.UnlimitedQuota != nil {
+		t.UnlimitedQuota = *req.UnlimitedQuota
 	}
-	if rpm != nil {
-		t.RPM = *rpm
+	if req.MaxConcurrent != nil {
+		if *req.MaxConcurrent < 0 {
+			return Token{}, fmt.Errorf("clients: max_concurrent < 0")
+		}
+		t.MaxConcurrent = *req.MaxConcurrent
 	}
-	_, err = s.db.Exec(`UPDATE api_tokens SET remain_quota=?, unlimited_quota=?, max_concurrent=?, rpm=?, updated_at=? WHERE id=?`,
-		t.RemainQuota, boolInt(t.UnlimitedQuota), t.MaxConcurrent, t.RPM, nowUnix(), id)
+	if req.RPM != nil {
+		if *req.RPM < 0 {
+			return Token{}, fmt.Errorf("clients: rpm < 0")
+		}
+		t.RPM = *req.RPM
+	}
+	if req.Enabled != nil {
+		t.Enabled = *req.Enabled
+	}
+	if req.ExpiresAt != nil {
+		if *req.ExpiresAt < 0 {
+			return Token{}, fmt.Errorf("clients: expires_at < 0")
+		}
+		t.ExpiresAt = *req.ExpiresAt
+	}
+	t.UpdatedAt = nowUnix()
+	_, err = s.db.Exec(`UPDATE api_tokens SET
+name=?, remain_quota=?, unlimited_quota=?, max_concurrent=?, rpm=?,
+enabled=?, expires_at=?, updated_at=? WHERE id=?`,
+		t.Name, t.RemainQuota, boolInt(t.UnlimitedQuota), t.MaxConcurrent, t.RPM,
+		boolInt(t.Enabled), t.ExpiresAt, t.UpdatedAt, id)
+	if err != nil {
+		return Token{}, err
+	}
+	s.gateMu.Lock()
+	t.Inflight = s.inflight[id]
+	s.gateMu.Unlock()
+	return t, nil
+}
+
+// PatchQuota 兼容旧接口：更新额度/并发/RPM。
+func (s *Store) PatchQuota(id string, remain *int64, unlimited *bool, maxConc *int, rpm *int) error {
+	_, err := s.Patch(id, PatchRequest{
+		RemainQuota:    remain,
+		UnlimitedQuota: unlimited,
+		MaxConcurrent:  maxConc,
+		RPM:            rpm,
+	})
 	return err
 }
 
@@ -330,14 +445,18 @@ FROM api_tokens WHERE key_hash=?`, hash).Scan(
 }
 
 // AcquireSlot 占用每令牌并发与 RPM；调用方必须 ReleaseSlot。
+//
+// 规则：
+//   - 始终 +1 inflight（含 maxConcurrent==0 的不限令牌）
+//   - maxConcurrent>0 且 inflight 已达上限 → ErrConcurrencyLimit
+//   - rpm>0 且窗口内超限 → ErrRPMLimit（失败时不占 inflight）
 func (s *Store) AcquireSlot(tokenID string, maxConcurrent, rpm int) error {
+	if tokenID == "" {
+		return fmt.Errorf("clients: empty token id")
+	}
 	s.gateMu.Lock()
 	defer s.gateMu.Unlock()
-	if maxConcurrent > 0 {
-		if s.inflight[tokenID] >= maxConcurrent {
-			return fmt.Errorf("clients: token concurrency limit %d", maxConcurrent)
-		}
-	}
+
 	if rpm > 0 {
 		w := s.rpmWin[tokenID]
 		now := time.Now()
@@ -346,19 +465,27 @@ func (s *Store) AcquireSlot(tokenID string, maxConcurrent, rpm int) error {
 			w = s.rpmWin[tokenID]
 		}
 		if w.count >= rpm {
-			return fmt.Errorf("clients: token rpm limit %d", rpm)
+			return fmt.Errorf("%w: %d", ErrRPMLimit, rpm)
 		}
-		w.count++
 	}
-	if maxConcurrent > 0 {
-		s.inflight[tokenID]++
+
+	cur := s.inflight[tokenID]
+	if maxConcurrent > 0 && cur >= maxConcurrent {
+		return fmt.Errorf("%w: %d", ErrConcurrencyLimit, maxConcurrent)
+	}
+
+	s.inflight[tokenID] = cur + 1
+	if rpm > 0 {
+		s.rpmWin[tokenID].count++
 	}
 	return nil
 }
 
 // ReleaseSlot 释放每令牌 in-flight。
+// 始终减计数；maxConcurrent 参数保留兼容，已忽略（避免 PATCH 改限额后泄漏）。
 func (s *Store) ReleaseSlot(tokenID string, maxConcurrent int) {
-	if maxConcurrent <= 0 {
+	_ = maxConcurrent
+	if tokenID == "" {
 		return
 	}
 	s.gateMu.Lock()
@@ -366,6 +493,19 @@ func (s *Store) ReleaseSlot(tokenID string, maxConcurrent int) {
 	if s.inflight[tokenID] > 0 {
 		s.inflight[tokenID]--
 	}
+	if s.inflight[tokenID] == 0 {
+		delete(s.inflight, tokenID)
+	}
+}
+
+// CurrentInflight 返回某令牌当前 in-flight 数。
+func (s *Store) CurrentInflight(tokenID string) int {
+	if s == nil {
+		return 0
+	}
+	s.gateMu.Lock()
+	defer s.gateMu.Unlock()
+	return s.inflight[tokenID]
 }
 
 // ReserveQuota 原子预扣额度。amount<=0 时按 1 计。

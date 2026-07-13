@@ -148,6 +148,8 @@ type Handlers struct {
 	Catalog *catalog.Catalog
 	// AccountHot 热池同步（启停账号）；可空则只改冷存储。
 	AccountHot AccountHot
+	// Outbound 出站工厂（账号测活 /billing）；可空则测活路由 503。
+	Outbound AccountProbeClient
 	// ImportJobs 异步 bulkimport 任务表（P1）；可空则相关路由 503。
 	ImportJobs *importjobs.Manager
 }
@@ -214,6 +216,7 @@ func (h *Handlers) Mount(mux *http.ServeMux) {
 	mux.HandleFunc("GET /admin/tokens", h.RequireAdmin(h.ListTokens))
 	mux.HandleFunc("POST /admin/tokens", h.RequireAdmin(h.CreateTokens))
 	mux.HandleFunc("POST /admin/tokens/batch", h.RequireAdmin(h.BatchTokens))
+	mux.HandleFunc("GET /admin/tokens/{id}", h.RequireAdmin(h.GetToken))
 	mux.HandleFunc("DELETE /admin/tokens/{id}", h.RequireAdmin(h.DeleteToken))
 	mux.HandleFunc("POST /admin/tokens/{id}/disable", h.RequireAdmin(h.DisableToken))
 	mux.HandleFunc("POST /admin/tokens/{id}/enable", h.RequireAdmin(h.EnableToken))
@@ -221,11 +224,13 @@ func (h *Handlers) Mount(mux *http.ServeMux) {
 	mux.HandleFunc("GET /admin/config", h.RequireAdmin(h.SafeConfig))
 	mux.HandleFunc("GET /admin/settings", h.RequireAdmin(h.GetSettings))
 	mux.HandleFunc("PUT /admin/settings", h.RequireAdmin(h.PutSettings))
-	// 账号目录（脱敏分页 / 手动启停 / 批量 / 代理 / 导出）
+	// 账号目录（脱敏分页 / 手动启停 / 批量 / 代理 / 导出 / 测活）
 	mux.HandleFunc("GET /admin/accounts", h.RequireAdmin(h.ListAccounts))
 	// 导出与批量路由须先于 /{id}/… 注册
 	mux.HandleFunc("GET /admin/accounts/export", h.RequireAdmin(h.ExportAccounts))
 	mux.HandleFunc("POST /admin/accounts/batch", h.RequireAdmin(h.BatchAccounts))
+	mux.HandleFunc("POST /admin/accounts/probe", h.RequireAdmin(h.BatchProbeAccounts))
+	mux.HandleFunc("POST /admin/accounts/{id}/probe", h.RequireAdmin(h.ProbeAccount))
 	mux.HandleFunc("POST /admin/accounts/{id}/disable", h.RequireAdmin(h.DisableAccount))
 	mux.HandleFunc("POST /admin/accounts/{id}/enable", h.RequireAdmin(h.EnableAccount))
 	mux.HandleFunc("PATCH /admin/accounts/{id}", h.RequireAdmin(h.PatchAccountProxy))
@@ -338,6 +343,7 @@ func (h *Handlers) ListTokens(w http.ResponseWriter, r *http.Request) {
 }
 
 // CreateTokens 快速创建/批量发放密钥（明文仅此响应返回一次）。
+// 指针字段语义：nil=未传 → 用默认模板；显式 0/false 保留，绝不被默认覆盖。
 func (h *Handlers) CreateTokens(w http.ResponseWriter, r *http.Request) {
 	if h.Tokens == nil {
 		writeErr(w, http.StatusServiceUnavailable, "令牌存储未启用")
@@ -348,26 +354,56 @@ func (h *Handlers) CreateTokens(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusBadRequest, err.Error())
 		return
 	}
-	// 未显式填写时使用管理台默认模板
+	if req.Name == "" {
+		req.Name = "client"
+	}
+	if req.Count <= 0 {
+		req.Count = 1
+	}
+	// 未显式填写时使用管理台默认模板（仅填 nil 字段）
 	if h.Settings != nil {
 		d := h.Settings.Snapshot()
-		if req.Name == "" {
-			req.Name = "client"
+		if req.RemainQuota == nil {
+			if d.TokenDefaultUnlimited {
+				z := int64(0)
+				req.RemainQuota = &z
+			} else if d.TokenDefaultRemainQuota > 0 {
+				v := d.TokenDefaultRemainQuota
+				req.RemainQuota = &v
+			} else {
+				z := int64(0)
+				req.RemainQuota = &z
+			}
 		}
-		if req.Count <= 0 {
-			req.Count = 1
+		if req.UnlimitedQuota == nil {
+			u := d.TokenDefaultUnlimited
+			req.UnlimitedQuota = &u
 		}
-		if !req.UnlimitedQuota && req.RemainQuota == 0 && d.TokenDefaultRemainQuota > 0 {
-			req.RemainQuota = d.TokenDefaultRemainQuota
+		if req.MaxConcurrent == nil {
+			// 默认并发：配置值；0 表示不限
+			v := d.TokenDefaultMaxConcurrent
+			req.MaxConcurrent = &v
 		}
-		if req.UnlimitedQuota == false && d.TokenDefaultUnlimited {
-			req.UnlimitedQuota = true
+		if req.RPM == nil {
+			v := d.TokenDefaultRPM
+			req.RPM = &v
 		}
-		if req.MaxConcurrent == 0 && d.TokenDefaultMaxConcurrent > 0 {
-			req.MaxConcurrent = d.TokenDefaultMaxConcurrent
+	} else {
+		if req.RemainQuota == nil {
+			z := int64(0)
+			req.RemainQuota = &z
 		}
-		if req.RPM == 0 && d.TokenDefaultRPM > 0 {
-			req.RPM = d.TokenDefaultRPM
+		if req.UnlimitedQuota == nil {
+			f := false
+			req.UnlimitedQuota = &f
+		}
+		if req.MaxConcurrent == nil {
+			z := 0
+			req.MaxConcurrent = &z
+		}
+		if req.RPM == nil {
+			z := 0
+			req.RPM = &z
 		}
 	}
 	res, err := h.Tokens.Create(req)
@@ -471,24 +507,46 @@ func (h *Handlers) setEnabled(w http.ResponseWriter, r *http.Request, en bool) {
 	writeJSON(w, http.StatusOK, map[string]any{"id": id, "enabled": en})
 }
 
-// PatchToken 调整额度/并发/RPM。
+// PatchToken 调整名称/额度/并发/RPM/启用状态。
+// 指针字段 nil=不改；显式 0 可把并发/RPM 改为「不限」。
+// 返回更新后的完整令牌（含 inflight），前端可直接刷新行。
 func (h *Handlers) PatchToken(w http.ResponseWriter, r *http.Request) {
 	id := r.PathValue("id")
 	if h.Tokens == nil {
 		writeErr(w, http.StatusServiceUnavailable, "令牌存储未启用")
 		return
 	}
-	var body struct {
-		RemainQuota    *int64 `json:"remain_quota"`
-		UnlimitedQuota *bool  `json:"unlimited_quota"`
-		MaxConcurrent  *int   `json:"max_concurrent"`
-		RPM            *int   `json:"rpm"`
-	}
+	var body clients.PatchRequest
 	if err := decodeJSON(r, 1<<20, &body); err != nil {
 		writeErr(w, http.StatusBadRequest, err.Error())
 		return
 	}
-	if err := h.Tokens.PatchQuota(id, body.RemainQuota, body.UnlimitedQuota, body.MaxConcurrent, body.RPM); err != nil {
+	if body.Name == nil && body.RemainQuota == nil && body.UnlimitedQuota == nil &&
+		body.MaxConcurrent == nil && body.RPM == nil && body.Enabled == nil && body.ExpiresAt == nil {
+		writeErr(w, http.StatusBadRequest, "无任何可更新字段")
+		return
+	}
+	tok, err := h.Tokens.Patch(id, body)
+	if err != nil {
+		if errors.Is(err, clients.ErrNotFound) {
+			writeErr(w, http.StatusNotFound, "令牌不存在")
+			return
+		}
+		writeErr(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"id": id, "patched": true, "token": tok})
+}
+
+// GetToken 单条令牌详情（含 inflight）。
+func (h *Handlers) GetToken(w http.ResponseWriter, r *http.Request) {
+	id := r.PathValue("id")
+	if h.Tokens == nil {
+		writeErr(w, http.StatusServiceUnavailable, "令牌存储未启用")
+		return
+	}
+	tok, err := h.Tokens.Get(id)
+	if err != nil {
 		if errors.Is(err, clients.ErrNotFound) {
 			writeErr(w, http.StatusNotFound, "令牌不存在")
 			return
@@ -496,7 +554,7 @@ func (h *Handlers) PatchToken(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusInternalServerError, err.Error())
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"id": id, "patched": true})
+	writeJSON(w, http.StatusOK, map[string]any{"token": tok})
 }
 
 // SafeConfig 返回可展示配置（无密钥）。

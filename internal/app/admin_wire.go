@@ -269,6 +269,7 @@ func wireAdmin(cfg config.Config, pool *poolStack, up *upstreamStack, metrics *h
 		Settings:   settingsCtl,
 		Catalog:    pool.Catalog,
 		AccountHot: pool.Hot,
+		Outbound:   up.Outbound,
 		ImportJobs: importJobs,
 	}
 

@@ -129,6 +129,24 @@ type AccountSummary struct {
 	Alive bool `json:"alive"`
 	// SuccessRate = success/(success+failure)；无样本时为 null（JSON 省略用指针）
 	SuccessRate *float64 `json:"success_rate,omitempty"`
+	// Inflight 热池实时占用（列表时由 admin 层填充；catalog 恒 0）
+	Inflight int32 `json:"inflight"`
+	// Billing 最近一次测活/额度快照（脱敏，来自 billing_json）
+	Billing *AccountBillingView `json:"billing,omitempty"`
+}
+
+// AccountBillingView 管理台展示用额度/测活摘要（无密钥）。
+type AccountBillingView struct {
+	MonthlyUsed          *float64 `json:"monthly_used,omitempty"`
+	MonthlyLimit         *float64 `json:"monthly_limit,omitempty"`
+	WeeklyUsagePercent   *float64 `json:"weekly_usage_percent,omitempty"`
+	GrokBuildPercent     *float64 `json:"grok_build_percent,omitempty"`
+	PeriodEnd            string   `json:"period_end,omitempty"`
+	ProbeOK              *bool    `json:"probe_ok,omitempty"`
+	ProbeStatus          int      `json:"probe_status,omitempty"`
+	ProbeError           string   `json:"probe_error,omitempty"`
+	ProbedAt             int64    `json:"probed_at,omitempty"`
+	UpdatedAt            int64    `json:"updated_at,omitempty"`
 }
 
 // ProxyAssignment 批量设置代理的一项（SetProxies）。

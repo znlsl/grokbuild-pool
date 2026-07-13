@@ -1686,3 +1686,41 @@ tr.tok-detail-row.hidden {
 @media (max-width: 800px) {
   .imp-active-row { grid-template-columns: 1fr; }
 }
+
+
+/* Token inline edit */
+.tok-edit {
+  margin-top: 12px;
+  padding-top: 12px;
+  border-top: 1px dashed var(--color-border-default);
+}
+.tok-edit-grid {
+  margin-bottom: 8px;
+}
+.tok-edit-hint {
+  margin: 4px 0 10px;
+  font-size: 12px;
+}
+.tok-edit-actions {
+  gap: 8px;
+}
+.tok-conc-cell {
+  white-space: nowrap;
+}
+
+
+/* Account pool metrics / billing / probe */
+.acc-metrics {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px 16px;
+  align-items: center;
+}
+.acc-billing {
+  font-size: 12px;
+  line-height: 1.35;
+  min-width: 110px;
+}
+.acc-stat strong {
+  color: var(--color-text-primary);
+}

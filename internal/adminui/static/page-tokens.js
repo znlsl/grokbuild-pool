@@ -1,4 +1,4 @@
-/* Tokens page */
+/* Tokens page — 创建 + 列表内联编辑并发/额度/RPM（PATCH 即时生效） */
 import { state } from "./state.js";
 import { $, esc, toast, copyText, skeletonRows } from "./util.js";
 import { api, handleAuthError } from "./api.js";
@@ -101,6 +101,160 @@ function updateTokSelUI() {
   if (bd) bd.disabled = n === 0;
 }
 
+function fmtConc(t) {
+  var max = t.max_concurrent != null ? t.max_concurrent : 0;
+  var inf = t.inflight != null ? t.inflight : 0;
+  if (!max) return "不限 · 占用 " + inf;
+  return inf + " / " + max;
+}
+
+function fmtRpm(t) {
+  return t.rpm ? String(t.rpm) : "不限";
+}
+
+function fmtQuota(t) {
+  return t.unlimited_quota ? "∞" : String(t.remain_quota != null ? t.remain_quota : 0);
+}
+
+function editFormHTML(t) {
+  var maxC = t.max_concurrent != null ? t.max_concurrent : 0;
+  var rpm = t.rpm != null ? t.rpm : 0;
+  var remain = t.remain_quota != null ? t.remain_quota : 0;
+  var unlim = t.unlimited_quota ? "1" : "0";
+  var name = t.name || "";
+  return (
+    '<div class="tok-edit" data-edit-id="' + esc(t.id) + '">' +
+    '<div class="form-row form-row-token tok-edit-grid">' +
+    '<div class="field"><label>名称</label>' +
+    '<input class="input tok-e-name" value="' + esc(name) + '" /></div>' +
+    '<div class="field"><label>并发上限 (0=不限)</label>' +
+    '<input class="input tok-e-conc" type="number" min="0" value="' + maxC + '" /></div>' +
+    '<div class="field"><label>RPM (0=不限)</label>' +
+    '<input class="input tok-e-rpm" type="number" min="0" value="' + rpm + '" /></div>' +
+    '<div class="field"><label>剩余额度</label>' +
+    '<input class="input tok-e-quota" type="number" min="0" value="' + remain + '" /></div>' +
+    '<div class="field"><label>无限额度</label>' +
+    '<select class="input tok-e-unlim">' +
+    '<option value="0"' + (unlim === "0" ? " selected" : "") + ">否</option>" +
+    '<option value="1"' + (unlim === "1" ? " selected" : "") + ">是</option>" +
+    "</select></div>" +
+    "</div>" +
+    '<p class="muted tok-edit-hint">保存后下一请求立即按新并发/RPM 限流；在途请求不中断。当前占用：' +
+    esc(String(t.inflight || 0)) + "</p>" +
+    '<div class="toolbar tok-edit-actions">' +
+    '<button type="button" class="btn btn-primary btn-sm" data-act="save-edit" data-id="' +
+    esc(t.id) + '">保存修改</button>' +
+    '<button type="button" class="btn btn-sm btn-secondary" data-act="cancel-edit" data-id="' +
+    esc(t.id) + '">取消</button>' +
+    "</div></div>"
+  );
+}
+
+function detailHTML(t) {
+  var key = t.api_key || t.plaintext || "";
+  var keyBlock = key
+    ? '<div class="tok-detail mono">' + esc(key) +
+      ' <button type="button" class="btn btn-sm btn-secondary" data-act="copy" data-key="' +
+      esc(key) + '">复制</button></div>'
+    : '<div class="tok-detail muted">密钥明文仅在创建时返回一次；列表不再回读明文。</div>';
+  return keyBlock + editFormHTML(t);
+}
+
+function tokenRowHTML(t) {
+  var status = t.enabled
+    ? '<span class="badge on">启用</span>'
+    : '<span class="badge off">禁用</span>';
+  var key = t.api_key || t.plaintext || "";
+  return '<tr class="tok-row" data-id="' + esc(t.id) + '">' +
+    '<td><input type="checkbox" class="tok-check" data-id="' + esc(t.id) +
+      '" data-key="' + esc(key) + '" /></td>' +
+    '<td><button type="button" class="btn btn-sm btn-ghost tok-expand" data-act="expand" aria-expanded="false">▸</button></td>' +
+    '<td class="mono">' + esc(t.id) + "</td>" +
+    "<td>" + esc(t.name) + "</td>" +
+    '<td class="mono">' + esc(t.key_prefix) + "</td>" +
+    "<td>" + status + "</td>" +
+    "<td>" + esc(fmtQuota(t)) + "</td>" +
+    '<td class="mono tok-conc-cell">' + esc(fmtConc(t)) + "</td>" +
+    "<td>" + esc(fmtRpm(t)) + "</td>" +
+    "<td>" + esc(String(t.used_quota || 0)) + " / " +
+      esc(String(t.request_count || 0)) + "</td>" +
+    '<td class="actions">' +
+    '<button type="button" class="btn btn-sm btn-secondary" data-act="edit" data-id="' +
+      esc(t.id) + '">编辑</button>' +
+    (t.enabled
+      ? '<button type="button" class="btn btn-sm btn-secondary" data-act="dis" data-id="' +
+        esc(t.id) + '">禁用</button>'
+      : '<button type="button" class="btn btn-sm btn-secondary" data-act="en" data-id="' +
+        esc(t.id) + '">启用</button>') +
+    '<button type="button" class="btn btn-sm btn-danger" data-act="del" data-id="' +
+      esc(t.id) + '">删除</button>' +
+    "</td></tr>" +
+    '<tr class="tok-detail-row hidden" data-for="' + esc(t.id) + '"><td colspan="11">' +
+    detailHTML(t) + "</td></tr>";
+}
+
+function openDetail(host, id) {
+  var detailRow = host.querySelector('tr.tok-detail-row[data-for="' + id + '"]');
+  var row = host.querySelector('tr.tok-row[data-id="' + id + '"]');
+  if (!detailRow || !row) return;
+  detailRow.classList.remove("hidden");
+  var btn = row.querySelector('[data-act="expand"]');
+  if (btn) {
+    btn.textContent = "▾";
+    btn.setAttribute("aria-expanded", "true");
+  }
+}
+
+function closeDetail(host, id) {
+  var detailRow = host.querySelector('tr.tok-detail-row[data-for="' + id + '"]');
+  var row = host.querySelector('tr.tok-row[data-id="' + id + '"]');
+  if (!detailRow || !row) return;
+  detailRow.classList.add("hidden");
+  var btn = row.querySelector('[data-act="expand"]');
+  if (btn) {
+    btn.textContent = "▸";
+    btn.setAttribute("aria-expanded", "false");
+  }
+}
+
+function parseIntSafe(el, fallback) {
+  if (!el) return fallback;
+  var n = parseInt(el.value, 10);
+  return isNaN(n) ? fallback : n;
+}
+
+function saveEdit(host, id, btn) {
+  var box = host.querySelector('.tok-edit[data-edit-id="' + id + '"]');
+  if (!box) {
+    toast("编辑表单不存在", false);
+    return;
+  }
+  var nameEl = box.querySelector(".tok-e-name");
+  var concEl = box.querySelector(".tok-e-conc");
+  var rpmEl = box.querySelector(".tok-e-rpm");
+  var quotaEl = box.querySelector(".tok-e-quota");
+  var unlimEl = box.querySelector(".tok-e-unlim");
+  var body = {
+    name: (nameEl && nameEl.value || "").trim() || "client",
+    max_concurrent: parseIntSafe(concEl, 0),
+    rpm: parseIntSafe(rpmEl, 0),
+    remain_quota: parseIntSafe(quotaEl, 0),
+    unlimited_quota: unlimEl && unlimEl.value === "1"
+  };
+  if (btn) btn.disabled = true;
+  api("/admin/tokens/" + encodeURIComponent(id), {
+    method: "PATCH",
+    body: body
+  }).then(function (res) {
+    toast("已保存：并发 " + body.max_concurrent + " · RPM " + body.rpm + "（立即生效）", true);
+    loadTokens();
+  }).catch(function (e) {
+    if (handleAuthError(e)) return;
+    toast(e.message || "保存失败", false);
+    if (btn) btn.disabled = false;
+  });
+}
+
 function loadTokens() {
   var host = $("tokTable");
   var cnt = $("tokCount");
@@ -111,51 +265,16 @@ function loadTokens() {
     if (!list.length) {
       host.innerHTML =
         '<div class="empty"><strong>暂无令牌</strong>' +
-        "使用上方表单快速创建；创建后可展开详情查看密钥。</div>";
+        "使用上方表单快速创建；创建后可展开编辑并发/额度/RPM。</div>";
       updateTokSelUI();
       return;
     }
-    var rows = list.map(function (t) {
-      var status = t.enabled
-        ? '<span class="badge on">启用</span>'
-        : '<span class="badge off">禁用</span>';
-      var quota = t.unlimited_quota ? "∞" : String(t.remain_quota != null ? t.remain_quota : 0);
-      var key = t.api_key || t.plaintext || "";
-      var detail = key
-        ? '<div class="tok-detail mono">' + esc(key) +
-          ' <button type="button" class="btn btn-sm btn-secondary" data-act="copy" data-key="' +
-          esc(key) + '">复制</button></div>'
-        : '<div class="tok-detail muted">密钥明文仅在创建时返回一次；列表不再回读明文。</div>';
-      return '<tr class="tok-row" data-id="' + esc(t.id) + '">' +
-        '<td><input type="checkbox" class="tok-check" data-id="' + esc(t.id) +
-          '" data-key="' + esc(key) + '" /></td>' +
-        '<td><button type="button" class="btn btn-sm btn-ghost tok-expand" data-act="expand" aria-expanded="false">▸</button></td>' +
-        '<td class="mono">' + esc(t.id) + "</td>" +
-        "<td>" + esc(t.name) + "</td>" +
-        '<td class="mono">' + esc(t.key_prefix) + "</td>" +
-        "<td>" + status + "</td>" +
-        "<td>" + esc(quota) + "</td>" +
-        "<td>" + esc(t.max_concurrent ? String(t.max_concurrent) : "—") + "</td>" +
-        "<td>" + esc(t.rpm ? String(t.rpm) : "—") + "</td>" +
-        "<td>" + esc(String(t.used_quota || 0)) + " / " +
-          esc(String(t.request_count || 0)) + "</td>" +
-        '<td class="actions">' +
-        (t.enabled
-          ? '<button type="button" class="btn btn-sm btn-secondary" data-act="dis" data-id="' +
-            esc(t.id) + '">禁用</button>'
-          : '<button type="button" class="btn btn-sm btn-secondary" data-act="en" data-id="' +
-            esc(t.id) + '">启用</button>') +
-        '<button type="button" class="btn btn-sm btn-danger" data-act="del" data-id="' +
-          esc(t.id) + '">删除</button>' +
-        "</td></tr>" +
-        '<tr class="tok-detail-row hidden" data-for="' + esc(t.id) + '"><td colspan="11">' +
-        detail + "</td></tr>";
-    }).join("");
+    var rows = list.map(tokenRowHTML).join("");
     host.innerHTML =
       '<div class="table-wrap"><table><thead><tr>' +
       '<th><input type="checkbox" id="tokCheckAll" title="全选" /></th>' +
       "<th></th><th>ID</th><th>名称</th><th>前缀</th><th>状态</th><th>额度</th>" +
-      "<th>并发</th><th>RPM</th><th>已用/请求</th><th></th>" +
+      "<th>并发(占用/上限)</th><th>RPM</th><th>已用/请求</th><th></th>" +
       "</tr></thead><tbody>" + rows + "</tbody></table></div>";
 
     var master = $("tokCheckAll");
@@ -176,14 +295,28 @@ function loadTokens() {
         var act = btn.getAttribute("data-act");
         if (act === "expand") {
           var row = btn.closest("tr");
-          var id = row && row.getAttribute("data-id");
-          if (!id) return;
-          var detailRow = host.querySelector('tr.tok-detail-row[data-for="' + id + '"]');
+          var eid = row && row.getAttribute("data-id");
+          if (!eid) return;
+          var detailRow = host.querySelector('tr.tok-detail-row[data-for="' + eid + '"]');
           if (!detailRow) return;
           var open = detailRow.classList.contains("hidden");
-          detailRow.classList.toggle("hidden", !open);
-          btn.textContent = open ? "▾" : "▸";
-          btn.setAttribute("aria-expanded", open ? "true" : "false");
+          if (open) openDetail(host, eid);
+          else closeDetail(host, eid);
+          return;
+        }
+        if (act === "edit") {
+          var editId = btn.getAttribute("data-id");
+          if (editId) openDetail(host, editId);
+          return;
+        }
+        if (act === "cancel-edit") {
+          var cid = btn.getAttribute("data-id");
+          if (cid) closeDetail(host, cid);
+          return;
+        }
+        if (act === "save-edit") {
+          var sid = btn.getAttribute("data-id");
+          if (sid) saveEdit(host, sid, btn);
           return;
         }
         if (act === "copy") {
@@ -206,11 +339,14 @@ function loadTokens() {
             method: "POST", body: {}
           });
           okMsg = "已禁用";
-        } else {
+        } else if (act === "en") {
           p = api("/admin/tokens/" + encodeURIComponent(id) + "/enable", {
             method: "POST", body: {}
           });
           okMsg = "已启用";
+        } else {
+          btn.disabled = false;
+          return;
         }
         p.then(function () {
           toast(okMsg, true);
@@ -240,16 +376,17 @@ export function renderTokens() {
   var defR = d.token_default_rpm != null ? d.token_default_rpm : 0;
   var defU = d.token_default_unlimited ? "1" : "0";
   $("main").innerHTML = wrapPage(
-    pageHd("令牌", "new-api 风格 · 明文仅在创建时显示一次 · 支持批量操作", "") +
+    pageHd("令牌", "创建 / 编辑并发·RPM·额度 · 明文仅创建时显示一次 · PATCH 立即生效", "") +
     '<div class="panel token-create-panel"><div class="panel-title">快速创建</div>' +
     '<div class="form-row form-row-token">' +
     '<div class="field"><label for="tName">名称</label><input id="tName" class="input" value="client" /></div>' +
     '<div class="field"><label for="tCount">数量 (1-100)</label><input id="tCount" class="input" type="number" value="1" min="1" max="100" /></div>' +
-    '<div class="field"><label for="tQuota">剩余额度</label><input id="tQuota" class="input" type="number" value="' + defQ + '" /></div>' +
+    '<div class="field"><label for="tQuota">剩余额度</label><input id="tQuota" class="input" type="number" value="' + defQ + '" min="0" /></div>' +
     '<div class="field"><label for="tUnlim">无限额度</label><select id="tUnlim" class="input"><option value="0"' + (defU === "0" ? " selected" : "") + '>否</option><option value="1"' + (defU === "1" ? " selected" : "") + '>是</option></select></div>' +
     '<div class="field"><label for="tConc">令牌并发上限 (0=不限)</label><input id="tConc" class="input" type="number" value="' + defC + '" min="0" /></div>' +
     '<div class="field"><label for="tRpm">RPM (0=不限)</label><input id="tRpm" class="input" type="number" value="' + defR + '" min="0" /></div>' +
     "</div>" +
+    '<p class="muted" style="margin:10px 0 0">并发=该密钥同时 in-flight 请求数硬顶；0=不限（仍受全局 max_concurrent）。创建后也可在列表点「编辑」改，保存立即生效。</p>' +
     '<div class="toolbar token-create-actions">' +
     '<button class="btn btn-primary" id="createBtn" type="button">创建并复制密钥</button>' +
     '<button class="page-action-btn" id="tokRefresh" type="button">刷新列表</button></div>' +
@@ -265,6 +402,7 @@ export function renderTokens() {
   );
 
   $("createBtn").addEventListener("click", function () {
+    // 显式传数字（含 0），后端用指针区分「未传」与「0=不限」
     var body = {
       name: ($("tName").value || "").trim() || "client",
       count: parseInt($("tCount").value, 10) || 1,
@@ -280,7 +418,7 @@ export function renderTokens() {
       bindOnceBox(keys);
       if (keys[0]) {
         copyText(keys.join("\n")).then(function () {
-          toast("已创建并复制到剪贴板", true);
+          toast("已创建并复制到剪贴板（并发=" + body.max_concurrent + "）", true);
         }).catch(function () {
           toast("已创建 " + keys.length + " 把密钥（请手动复制）", true);
         });

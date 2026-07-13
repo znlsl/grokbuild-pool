@@ -1053,7 +1053,8 @@ SELECT
   (access_token IS NOT NULL AND access_token != '') AS has_access,
   (refresh_token IS NOT NULL AND refresh_token != '') AS has_refresh,
   COALESCE(last_error, ''),
-  last_used_at
+  last_used_at,
+  COALESCE(billing_json, '')
 FROM accounts
 WHERE ` + strings.Join(where, " AND ") + `
 ORDER BY id ASC
@@ -1075,11 +1076,13 @@ LIMIT ?`
 			hasRef      int
 			lastUsed    sql.NullInt64
 			lastSuccess sql.NullInt64
+			billingJSON string
 		)
 		if err := rows.Scan(
 			&s.ID, &s.Email, &s.Name, &s.Lifecycle, &s.ProxyMode, &s.ProxyURL,
 			&s.Priority, &enabled, &manual, &s.ExpiresAt, &s.CooldownUntil,
 			&s.FailureCount, &s.SuccessCount, &lastSuccess, &s.Revision, &hasAcc, &hasRef, &s.LastError, &lastUsed,
+			&billingJSON,
 		); err != nil {
 			return nil, fmt.Errorf("catalog: list accounts scan: %w", err)
 		}
@@ -1097,6 +1100,7 @@ LIMIT ?`
 			rate := float64(s.SuccessCount) / float64(total)
 			s.SuccessRate = &rate
 		}
+		s.Billing = ParseAccountBillingView(billingJSON)
 		out = append(out, s)
 	}
 	if err := rows.Err(); err != nil {

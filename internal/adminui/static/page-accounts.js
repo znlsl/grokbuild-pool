@@ -29,12 +29,23 @@ function updateAccPagerUI(pageCount) {
   var statsEl = $("accStats");
   if (statsEl && state.accStats) {
     var s = state.accStats;
+    var p = state.accPage || {};
     statsEl.innerHTML =
+      '<div class="acc-metrics">' +
       '<span class="acc-stat">启用 <strong>' + esc(String(s.enabled != null ? s.enabled : "—")) + "</strong></span>" +
       '<span class="acc-stat">活跃 <strong>' + esc(String(s.active != null ? s.active : "—")) + "</strong></span>" +
       '<span class="acc-stat">冷却 <strong>' + esc(String(s.cooldown != null ? s.cooldown : "—")) + "</strong></span>" +
       '<span class="acc-stat">隔离 <strong>' + esc(String(s.quarantine != null ? s.quarantine : "—")) + "</strong></span>" +
-      '<span class="acc-stat">禁用 <strong>' + esc(String(s.disabled != null ? s.disabled : "—")) + "</strong></span>";
+      '<span class="acc-stat">禁用 <strong>' + esc(String(s.disabled != null ? s.disabled : "—")) + "</strong></span>" +
+      (p.count != null
+        ? '<span class="acc-stat">本页存活 <strong>' + esc(String(p.alive != null ? p.alive : 0)) +
+          "</strong>/" + esc(String(p.count)) + "</span>" +
+          '<span class="acc-stat">本页 inflight <strong>' + esc(String(p.inflight_sum != null ? p.inflight_sum : 0)) +
+          "</strong></span>" +
+          '<span class="acc-stat">额度快照 <strong>' + esc(String(p.with_billing != null ? p.with_billing : 0)) +
+          "</strong></span>"
+        : "") +
+      "</div>";
   }
 }
 
@@ -62,6 +73,60 @@ function updateAccSelUI() {
   if (bd) bd.disabled = n === 0;
   var bdel = $("accBatchDelete");
   if (bdel) bdel.disabled = n === 0;
+  var bp = $("accBatchProbe");
+  if (bp) bp.disabled = n === 0;
+}
+
+
+function fmtNum(v, digits) {
+  if (v == null || v === "" || isNaN(Number(v))) return "—";
+  var n = Number(v);
+  if (digits == null) digits = 0;
+  if (Math.abs(n) >= 1000) return n.toFixed(0);
+  return n.toFixed(digits);
+}
+
+function formatBilling(a) {
+  var b = a && a.billing;
+  if (!b) {
+    return '<span class="muted">未测活</span>';
+  }
+  var parts = [];
+  if (b.monthly_used != null || b.monthly_limit != null) {
+    parts.push("月 " + fmtNum(b.monthly_used, 0) + "/" + fmtNum(b.monthly_limit, 0));
+  }
+  if (b.weekly_usage_percent != null) {
+    parts.push("周 " + fmtNum(b.weekly_usage_percent, 1) + "%");
+  }
+  if (b.grok_build_percent != null) {
+    parts.push("Build " + fmtNum(b.grok_build_percent, 1) + "%");
+  }
+  var probe = "";
+  if (b.probe_ok === true) probe = '<span class="badge on">测活OK</span>';
+  else if (b.probe_ok === false) probe = '<span class="badge off">测活失败</span>';
+  var when = b.probed_at ? '<div class="muted" style="font-size:11px">' + esc(fmtUnix(b.probed_at)) + "</div>" : "";
+  if (!parts.length) {
+    return (probe || '<span class="muted">—</span>') + when;
+  }
+  return '<div class="acc-billing">' + parts.map(function (p) {
+    return '<div>' + esc(p) + "</div>";
+  }).join("") + (probe ? "<div>" + probe + "</div>" : "") + when + "</div>";
+}
+
+function fmtUnix(sec) {
+  var n = Number(sec);
+  if (!n) return "—";
+  try {
+    return new Date(n * 1000).toLocaleString();
+  } catch (e) {
+    return String(sec);
+  }
+}
+
+function formatInflight(a) {
+  var n = a.inflight != null ? a.inflight : 0;
+  if (!n) return '<span class="muted">0</span>';
+  return '<span class="mono">' + esc(String(n)) + "</span>";
 }
 
 function accountStatusBadges(a) {
@@ -160,6 +225,8 @@ function loadAccounts() {
     state.accNextCursor = (res && res.next_cursor) ? String(res.next_cursor) : "";
     if (res && res.total != null) state.accTotal = Number(res.total) || 0;
     if (res && res.stats) state.accStats = res.stats;
+    if (res && res.page) state.accPage = res.page;
+    else state.accPage = null;
     if (!list.length) {
       if (state.accPageIndex > 1) {
         if (state.accCursorStack.length) {
@@ -186,10 +253,14 @@ function loadAccounts() {
         "<td>" + esc(a.email || "—") + "</td>" +
         "<td>" + accountStatusBadges(a) + "</td>" +
         "<td>" + formatSuccessRate(a) + "</td>" +
+        "<td>" + formatInflight(a) + "</td>" +
+        "<td>" + formatBilling(a) + "</td>" +
         '<td class="mono muted">' + esc(life) + "</td>" +
         "<td>" + esc(String(a.priority != null ? a.priority : 0)) + "</td>" +
         '<td class="mono" title="' + esc(proxy) + '">' + esc(proxy) + "</td>" +
         '<td class="actions">' +
+        '<button type="button" class="btn btn-sm btn-secondary" data-act="probe" data-id="' +
+          esc(a.id) + '">测活</button>' +
         (a.enabled
           ? '<button type="button" class="btn btn-sm btn-secondary" data-act="dis" data-id="' +
             esc(a.id) + '">禁用</button>'
@@ -200,7 +271,7 @@ function loadAccounts() {
     host.innerHTML =
       '<div class="table-wrap"><table><thead><tr>' +
       '<th><input type="checkbox" id="accCheckAll" title="全选本页" /></th>' +
-      "<th>ID</th><th>Email</th><th>状态</th><th>成功率</th><th>生命周期</th>" +
+      "<th>ID</th><th>Email</th><th>状态</th><th>成功率</th><th>并发</th><th>额度/测活</th><th>生命周期</th>" +
       "<th>优先级</th><th>代理</th><th></th>" +
       "</tr></thead><tbody>" + rows + "</tbody></table></div>";
 
@@ -226,6 +297,30 @@ function loadAccounts() {
         var act = btn.getAttribute("data-act");
         if (!id) return;
         btn.disabled = true;
+        if (act === "probe") {
+          api("/admin/accounts/" + encodeURIComponent(id) + "/probe", {
+            method: "POST", body: {}
+          }).then(function (res) {
+            if (res && res.probe_ok) {
+              var bits = ["测活成功"];
+              if (res.monthly_used != null || res.monthly_limit != null) {
+                bits.push("月 " + fmtNum(res.monthly_used, 0) + "/" + fmtNum(res.monthly_limit, 0));
+              }
+              if (res.weekly_usage_percent != null) {
+                bits.push("周 " + fmtNum(res.weekly_usage_percent, 1) + "%");
+              }
+              toast(bits.join(" · "), true);
+            } else {
+              toast("测活失败：" + ((res && res.probe_error) || "unknown"), false);
+            }
+            loadAccounts();
+          }).catch(function (e) {
+            if (handleAuthError(e)) return;
+            toast(e.message || "测活失败", false);
+            btn.disabled = false;
+          });
+          return;
+        }
         var path = act === "dis"
           ? "/admin/accounts/" + encodeURIComponent(id) + "/disable"
           : "/admin/accounts/" + encodeURIComponent(id) + "/enable";
@@ -264,11 +359,12 @@ export function renderAccounts() {
   state.accPageIndex = 1;
   state.accTotal = 0;
   state.accStats = null;
+  state.accPage = null;
   if (state.accFilterStatus == null) state.accFilterStatus = "";
   if (state.accFilterLife == null) state.accFilterLife = "";
   if (state.accFilterQ == null) state.accFilterQ = "";
   $("main").innerHTML = wrapPage(
-    pageHd("账户管理", "冷存储脱敏列表 · 存活/成功率 · 筛选 · 批量无条数硬限（服务端自动分块）",
+    pageHd("账户管理", "号池指标 · 额度/测活 · 存活/成功率 · 批量无条数硬限",
       '<button type="button" class="page-action-btn" id="accExport">导出 JSON</button>' +
       '<button type="button" class="page-action-btn" id="accRefresh">刷新</button>') +
     '<div class="panel">' +
@@ -302,6 +398,7 @@ export function renderAccounts() {
     '<button type="button" class="btn btn-sm btn-secondary" id="accSelectNone" disabled>清空</button>' +
     '<button type="button" class="btn btn-sm btn-secondary" id="accBatchEnable" disabled>批量启用</button>' +
     '<button type="button" class="btn btn-sm btn-danger" id="accBatchDisable" disabled>批量禁用</button>' +
+    '<button type="button" class="btn btn-sm btn-secondary" id="accBatchProbe" disabled>批量测活</button>' +
     '<button type="button" class="btn btn-sm btn-danger" id="accBatchDelete" disabled>批量删除</button>' +
     '<span class="muted" id="accSelCount">已选 0</span>' +
     '<span class="toolbar-spacer"></span>' +
@@ -374,6 +471,33 @@ export function renderAccounts() {
   });
   $("accBatchDisable").addEventListener("click", function () {
     runBatchAccounts("disable");
+  });
+  $("accBatchProbe").addEventListener("click", function () {
+    var ids = selectedAccountIds();
+    if (!ids.length) {
+      toast("请先勾选账号", false);
+      return;
+    }
+    if (ids.length > 100) {
+      toast("单次最多测活 100 个", false);
+      return;
+    }
+    var btn = $("accBatchProbe");
+    if (btn) btn.disabled = true;
+    var t0 = Date.now();
+    api("/admin/accounts/probe", {
+      method: "POST",
+      body: { ids: ids }
+    }).then(function (res) {
+      var ok = res && res.ok != null ? res.ok : 0;
+      var failed = res && res.failed != null ? res.failed : 0;
+      toast("批量测活：OK " + ok + " · 失败 " + failed + "（" + (Date.now() - t0) + "ms）", failed === 0);
+      loadAccounts();
+    }).catch(function (e) {
+      if (handleAuthError(e)) return;
+      toast(e.message || "批量测活失败", false);
+      updateAccSelUI();
+    });
   });
   $("accBatchDelete").addEventListener("click", function () {
     runBatchAccounts("delete");

@@ -230,13 +230,23 @@ func (m *Middleware) RequireClient(next http.Handler) http.Handler {
 					m.Metrics.IncReject()
 				}
 				w.Header().Set("Retry-After", "1")
-				writeRouteError(w, r, http.StatusServiceUnavailable, err.Error())
+				msg := "令牌并发已满"
+				if errors.Is(err, clients.ErrRPMLimit) {
+					msg = "令牌 RPM 已达上限"
+				} else if errors.Is(err, clients.ErrConcurrencyLimit) {
+					msg = "令牌并发已满"
+				} else {
+					msg = err.Error()
+				}
+				writeRouteError(w, r, http.StatusServiceUnavailable, msg)
 				return
 			}
-			defer m.TokenStore.ReleaseSlot(info.TokenID, info.MaxConcurrent)
+			// 始终释放 inflight（与 Acquire 时 max 无关）
+			defer m.TokenStore.ReleaseSlot(info.TokenID, 0)
 			// 原子预扣 1 单位额度，防止并发超花；结束后按实际 usage 结算
 			const reserveUnits int64 = 1
 			if err := m.TokenStore.ReserveQuota(info.TokenID, reserveUnits); err != nil {
+				// Reserve 失败时 defer 会 ReleaseSlot；此处直接返回
 				status, msg := http.StatusPaymentRequired, "令牌额度已用尽"
 				if !errors.Is(err, clients.ErrQuotaExceeded) {
 					status, msg = http.StatusUnauthorized, "无效 api key"

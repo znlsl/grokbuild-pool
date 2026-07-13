@@ -65,11 +65,30 @@ func (h *Handlers) ListAccounts(w http.ResponseWriter, r *http.Request) {
 	if rows == nil {
 		rows = []catalog.AccountSummary{}
 	}
+	// 填充热池 inflight
+	if h.AccountHot != nil {
+		for i := range rows {
+			if meta, ok := h.AccountHot.Get(rows[i].ID); ok {
+				rows[i].Inflight = meta.Inflight
+			}
+		}
+	}
 	total := 0
 	if n, err := h.Catalog.CountAccountsFiltered(filter); err == nil {
 		total = n
 	}
 	stats, _ := h.Catalog.Stats()
+	// 本页聚合：存活 / 有额度快照 / 热池占用
+	aliveN, billingN, inflightSum := 0, 0, int64(0)
+	for _, a := range rows {
+		if a.Alive {
+			aliveN++
+		}
+		if a.Billing != nil {
+			billingN++
+		}
+		inflightSum += int64(a.Inflight)
+	}
 	writeJSON(w, http.StatusOK, map[string]any{
 		"accounts":    rows,
 		"next_cursor": nextCursor,
@@ -87,6 +106,12 @@ func (h *Handlers) ListAccounts(w http.ResponseWriter, r *http.Request) {
 			"cooldown":   stats.CooldownCount,
 			"quarantine": stats.QuarantineCount,
 			"disabled":   stats.DisabledCount,
+		},
+		"page": map[string]any{
+			"alive":         aliveN,
+			"with_billing":  billingN,
+			"inflight_sum":  inflightSum,
+			"count":         len(rows),
 		},
 	})
 }
