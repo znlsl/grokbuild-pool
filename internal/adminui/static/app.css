@@ -1724,3 +1724,23 @@ tr.tok-detail-row.hidden {
 .acc-stat strong {
   color: var(--color-text-primary);
 }
+
+
+/* Import multi-file picker */
+.imp-file-list {
+  margin: 8px 0 0;
+  font-size: 13px;
+}
+.imp-file-summary {
+  margin-bottom: 6px;
+}
+.imp-file-ul {
+  margin: 0;
+  padding-left: 18px;
+  max-height: 140px;
+  overflow: auto;
+}
+.imp-file-ul li {
+  margin: 2px 0;
+  word-break: break-all;
+}

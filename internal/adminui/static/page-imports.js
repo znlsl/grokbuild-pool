@@ -61,9 +61,10 @@ export function renderImportJobs() {
     '<div class="form-row">' +
     '<div><label for="impFormat">格式</label>' +
     '<select id="impFormat" class="input"><option value="sso" selected>SSO</option><option value="json">JSON</option><option value="ndjson">NDJSON</option></select></div>' +
-    '<div><label for="impFile">本地文件</label>' +
-    '<input id="impFile" class="input file-input" type="file" accept=".txt,.json,text/plain,application/json" /></div></div>' +
-    '<p class="muted panel-note import-limit-note" id="impLimits">默认 SSO→JSON · 最多 10000 条 · 正在读取服务端限制…</p>' +
+    '<div><label for="impFile">本地文件（可多选）</label>' +
+    '<input id="impFile" class="input file-input" type="file" multiple accept=".txt,.json,text/plain,application/json" /></div></div>' +
+    '<p class="muted panel-note import-limit-note" id="impLimits">默认 SSO→JSON · 最多 10000 条 · 可一次选多个文件，每个文件一个任务 · 正在读取服务端限制…</p>' +
+    '<div id="impFileList" class="imp-file-list muted"></div>' +
     '<div class="toolbar form-actions">' +
     '<button type="button" class="btn btn-primary" id="impSubmit">上传并创建任务</button></div></div>' +
     '<div class="section-head"><div class="section-title">任务列表</div></div>' +
@@ -131,7 +132,7 @@ export function renderImportJobs() {
           ? "不限体积"
           : ("体积兜底 " + Math.round(importMaxUpload / 1048576) + " MiB");
         note.textContent = "默认 SSO→JSON · 最多 " + importMaxEntries +
-          " 条 · " + sizeHint + " · 转换器" +
+          " 条 · " + sizeHint + " · 可多选文件（每个文件一个任务） · 转换器" +
           (limits.sso_converter_configured ? "已就绪（内置 Go Device Flow，支持实时进度）" : "未就绪");
       }
       renderActive(list);
@@ -170,43 +171,134 @@ export function renderImportJobs() {
     else input.accept = ".json,application/json";
   }
 
-  $("impFormat").addEventListener("change", syncFileAccept);
-  $("impRefresh").addEventListener("click", loadJobs);
-  $("impSubmit").addEventListener("click", function () {
+  function selectedImportFiles() {
     var input = $("impFile");
-    var file = input && input.files && input.files[0];
-    if (!file) {
-      setImportError("请选择要上传的本地文件");
+    if (!input || !input.files || !input.files.length) return [];
+    var out = [];
+    for (var i = 0; i < input.files.length; i++) out.push(input.files[i]);
+    return out;
+  }
+
+  function renderFileList() {
+    var host = $("impFileList");
+    if (!host) return;
+    var files = selectedImportFiles();
+    if (!files.length) {
+      host.innerHTML = "";
       return;
     }
-    if (importMaxUpload > 0 && file.size > importMaxUpload) {
-      setImportError("文件超过 " + Math.round(importMaxUpload / 1048576) + " MiB；服务端也会再次校验");
+    var total = 0;
+    files.forEach(function (f) { total += f.size || 0; });
+    host.innerHTML =
+      '<div class="imp-file-summary">已选 <strong>' + files.length +
+      "</strong> 个文件 · 合计 " + esc(formatBytes(total)) + "</div>" +
+      '<ul class="imp-file-ul">' + files.map(function (f, i) {
+        return "<li><span class=\"mono\">" + esc(f.name || ("file-" + (i + 1))) +
+          "</span> · " + esc(formatBytes(f.size || 0)) + "</li>";
+      }).join("") + "</ul>";
+  }
+
+  function formatBytes(n) {
+    n = Number(n) || 0;
+    if (n < 1024) return n + " B";
+    if (n < 1048576) return (n / 1024).toFixed(1) + " KiB";
+    if (n < 1073741824) return (n / 1048576).toFixed(1) + " MiB";
+    return (n / 1073741824).toFixed(2) + " GiB";
+  }
+
+  function importErrorMessage(e) {
+    if (!e) return "提交失败";
+    if (e.status === 413) return "文件超过上传大小限制";
+    if (e.status === 429) return "导入任务已满，请稍后重试";
+    if (e.status === 503) return "SSO 转换器未配置或导入服务不可用";
+    return e.message || "提交失败";
+  }
+
+  function submitOneImport(file, format) {
+    var data = new FormData();
+    data.append("format", format);
+    data.append("file", file, file.name);
+    return api("/admin/import/jobs", { method: "POST", body: data });
+  }
+
+  $("impFormat").addEventListener("change", syncFileAccept);
+  $("impRefresh").addEventListener("click", loadJobs);
+  var fileInput = $("impFile");
+  if (fileInput) {
+    fileInput.addEventListener("change", renderFileList);
+  }
+  $("impSubmit").addEventListener("click", function () {
+    var input = $("impFile");
+    var files = selectedImportFiles();
+    if (!files.length) {
+      setImportError("请选择要上传的本地文件（可多选）");
+      return;
+    }
+    if (files.length > 50) {
+      setImportError("一次最多选择 50 个文件");
+      return;
+    }
+    var tooBig = [];
+    if (importMaxUpload > 0) {
+      files.forEach(function (f) {
+        if (f.size > importMaxUpload) tooBig.push(f.name || "?");
+      });
+    }
+    if (tooBig.length) {
+      setImportError("以下文件超过 " + Math.round(importMaxUpload / 1048576) +
+        " MiB：" + tooBig.slice(0, 5).join("、") + (tooBig.length > 5 ? "…" : ""));
       return;
     }
     setImportError("");
-    var data = new FormData();
-    data.append("format", $("impFormat").value);
-    data.append("file", file, file.name);
+    var format = $("impFormat").value;
     var btn = $("impSubmit");
     btn.disabled = true;
-    btn.textContent = "上传中…";
-    api("/admin/import/jobs", { method: "POST", body: data }).then(function () {
-      input.value = "";
-      toast("导入任务已创建", true);
-      return loadJobs();
-    }).catch(function (e) {
-      if (handleAuthError(e)) return;
-      var message = e.status === 413 ? "文件超过上传大小限制" :
-        e.status === 429 ? "导入任务已满，请稍后重试" :
-        e.status === 503 ? "SSO 转换器未配置或导入服务不可用" :
-        (e.message || "提交失败");
-      setImportError(message);
-      toast(message, false);
-    }).then(function () {
-      btn.disabled = false;
-      btn.textContent = "上传并创建任务";
-    });
+    var ok = 0;
+    var fail = 0;
+    var errors = [];
+    var i = 0;
+
+    function next() {
+      if (i >= files.length) {
+        if (input) input.value = "";
+        renderFileList();
+        btn.disabled = false;
+        btn.textContent = "上传并创建任务";
+        if (fail === 0) {
+          toast("已创建 " + ok + " 个导入任务", true);
+        } else {
+          var msg = "创建完成：成功 " + ok + " · 失败 " + fail +
+            (errors[0] ? ("（" + errors[0] + "）") : "");
+          setImportError(msg);
+          toast(msg, ok > 0);
+        }
+        return loadJobs();
+      }
+      var file = files[i++];
+      btn.textContent = "上传中 " + i + "/" + files.length + "…";
+      return submitOneImport(file, format).then(function () {
+        ok++;
+      }).catch(function (e) {
+        if (handleAuthError(e)) {
+          btn.disabled = false;
+          btn.textContent = "上传并创建任务";
+          return Promise.reject(e);
+        }
+        fail++;
+        errors.push((file.name || "file") + ": " + importErrorMessage(e));
+        // 429 任务已满：停止后续，避免连打
+        if (e && e.status === 429) {
+          i = files.length;
+        }
+      }).then(function (stopped) {
+        if (stopped && stopped.__auth) return;
+        return next();
+      });
+    }
+
+    next().catch(function () { /* auth already handled */ });
   });
   syncFileAccept();
+  renderFileList();
   loadJobs();
 }
