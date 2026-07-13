@@ -525,13 +525,18 @@ func (c *SettingsController) Apply(in RuntimeSettings) (RuntimeSettings, error) 
 	if c.Hot != nil {
 		c.Hot.SetMaxInflightPerAccount(in.MaxInflightPerAccount)
 	}
-	// 即时生效：热池容量（Resize + 可选 ReloadHot 重建）
-	hotSizeChanged := in.HotSize > 0 && in.HotSize != prev.HotSize
-	if hotSizeChanged && c.Hot != nil {
-		c.Hot.Resize(in.HotSize)
-		if c.ReloadHot != nil {
-			if err := c.ReloadHot(in.HotSize); err != nil {
-				return in, fmt.Errorf("settings: reload hot after resize: %w", err)
+	// 即时生效：热池容量（Resize + 可选 ReloadHot 重建）。
+	// 必须用 Hot.Cap() 对比：启动时 settings.json 可能已是 30000，
+	// 但 openPool 先按 YAML 建了 3000 的热池；若只比 prev.HotSize
+	// 会认为未变更而永远不扩容。
+	if c.Hot != nil && in.HotSize > 0 {
+		needResize := c.Hot.Cap() != in.HotSize || in.HotSize != prev.HotSize
+		if needResize {
+			c.Hot.Resize(in.HotSize)
+			if c.ReloadHot != nil {
+				if err := c.ReloadHot(in.HotSize); err != nil {
+					return in, fmt.Errorf("settings: reload hot after resize: %w", err)
+				}
 			}
 		}
 	}

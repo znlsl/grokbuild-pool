@@ -34,12 +34,14 @@ func openPool(cfg config.Config, logger *slog.Logger) *poolStack {
 		fail(logger, "catalog_open_failed", err)
 	}
 
+	// 启动热池容量以 YAML/默认值为准；data/settings.json 的 hot_size 在 wireAdmin.Apply 时
+	// 按 Cap()!=目标 强制 Resize+LoadEligible（见 settings.Apply）。
 	hotSize := cfg.EffectiveHotSize()
 	maxInflight := int32(cfg.Selector.MaxInflightPerAccount)
 	if maxInflight <= 0 {
 		maxInflight = 4
 	}
-	idx := hot.New(hot.Config{HotSize: cfg.HotSize, MaxInflightPerAccount: maxInflight})
+	idx := hot.New(hot.Config{HotSize: hotSize, MaxInflightPerAccount: maxInflight})
 	logger.Info("antiban_limits", "max_inflight_per_account", maxInflight)
 
 	loaded, err := idx.LoadEligible(cat)
@@ -47,7 +49,7 @@ func openPool(cfg config.Config, logger *slog.Logger) *poolStack {
 		_ = cat.Close()
 		fail(logger, "hot_load_failed", err)
 	}
-	logger.Info("hot_index_loaded", "hot_size", loaded, "cap", hotSize)
+	logger.Info("hot_index_loaded", "hot_size", loaded, "cap", idx.Cap())
 
 	selCfg := selector.Config{
 		Strategy:     cfg.Selector.Strategy,

@@ -114,6 +114,9 @@ func wireAdmin(cfg config.Config, pool *poolStack, up *upstreamStack, metrics *h
 		Path:     settingsPath,
 		Hot:      pool.Hot,
 		ReloadHot: func(newSize int) error {
+			if newSize > 0 && pool.Hot.Cap() != newSize {
+				pool.Hot.Resize(newSize)
+			}
 			n, err := pool.Hot.LoadEligible(pool.Catalog)
 			if err != nil {
 				return err
