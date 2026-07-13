@@ -74,6 +74,7 @@ CREATE TABLE IF NOT EXISTS api_tokens (
   name TEXT NOT NULL DEFAULT '',
   key_prefix TEXT NOT NULL,
   key_hash TEXT NOT NULL UNIQUE,
+  key_plain TEXT NOT NULL DEFAULT '',
   enabled INTEGER NOT NULL DEFAULT 1,
   remain_quota INTEGER NOT NULL DEFAULT 0,
   unlimited_quota INTEGER NOT NULL DEFAULT 0,
@@ -89,7 +90,12 @@ CREATE TABLE IF NOT EXISTS api_tokens (
 CREATE INDEX IF NOT EXISTS idx_tokens_hash ON api_tokens(key_hash);
 CREATE INDEX IF NOT EXISTS idx_tokens_enabled ON api_tokens(enabled);
 `)
-	return err
+	if err != nil {
+		return err
+	}
+	// 旧库兼容：补 key_plain 列（管理台展开查看 / 批量复制）
+	_, _ = s.db.Exec(`ALTER TABLE api_tokens ADD COLUMN key_plain TEXT NOT NULL DEFAULT ''`)
+	return nil
 }
 
 // Create 发放一把或多把令牌；明文仅在此返回。
@@ -128,16 +134,16 @@ func (s *Store) Create(req CreateRequest) ([]CreateResult, error) {
 			itemName = fmt.Sprintf("%s-%d", name, i+1)
 		}
 		t := Token{
-			ID: id, Name: itemName, KeyPrefix: prefix, KeyHash: hash,
+			ID: id, Name: itemName, KeyPrefix: prefix, KeyHash: hash, APIKey: plain,
 			Enabled: true, RemainQuota: req.RemainQuota, UnlimitedQuota: req.UnlimitedQuota,
 			MaxConcurrent: req.MaxConcurrent, RPM: req.RPM, ExpiresAt: req.ExpiresAt,
 			CreatedAt: now, UpdatedAt: now,
 		}
 		_, err = tx.Exec(`INSERT INTO api_tokens(
-id,name,key_prefix,key_hash,enabled,remain_quota,unlimited_quota,max_concurrent,rpm,
+id,name,key_prefix,key_hash,key_plain,enabled,remain_quota,unlimited_quota,max_concurrent,rpm,
 used_quota,request_count,expires_at,created_at,updated_at,last_used_at
-) VALUES(?,?,?,?,1,?,?,?,?,0,0,?,?,?,0)`,
-			t.ID, t.Name, t.KeyPrefix, t.KeyHash, t.RemainQuota, boolInt(t.UnlimitedQuota),
+) VALUES(?,?,?,?,?,1,?,?,?,?,0,0,?,?,?,0)`,
+			t.ID, t.Name, t.KeyPrefix, t.KeyHash, plain, t.RemainQuota, boolInt(t.UnlimitedQuota),
 			t.MaxConcurrent, t.RPM, t.ExpiresAt, t.CreatedAt, t.UpdatedAt)
 		if err != nil {
 			return nil, fmt.Errorf("clients: insert: %w", err)
@@ -150,12 +156,12 @@ used_quota,request_count,expires_at,created_at,updated_at,last_used_at
 	return out, nil
 }
 
-// List 按创建时间倒序列出（无密钥明文）。
+// List 按创建时间倒序列出（含 key_plain 供管理台展开/批量复制）。
 func (s *Store) List(limit int) ([]Token, error) {
 	if limit <= 0 || limit > 500 {
 		limit = 100
 	}
-	rows, err := s.db.Query(`SELECT id,name,key_prefix,enabled,remain_quota,unlimited_quota,max_concurrent,rpm,
+	rows, err := s.db.Query(`SELECT id,name,key_prefix,COALESCE(key_plain,''),enabled,remain_quota,unlimited_quota,max_concurrent,rpm,
 used_quota,request_count,expires_at,created_at,updated_at,last_used_at
 FROM api_tokens ORDER BY created_at DESC LIMIT ?`, limit)
 	if err != nil {
@@ -166,7 +172,7 @@ FROM api_tokens ORDER BY created_at DESC LIMIT ?`, limit)
 	for rows.Next() {
 		var t Token
 		var en, unlim int
-		if err := rows.Scan(&t.ID, &t.Name, &t.KeyPrefix, &en, &t.RemainQuota, &unlim, &t.MaxConcurrent, &t.RPM,
+		if err := rows.Scan(&t.ID, &t.Name, &t.KeyPrefix, &t.APIKey, &en, &t.RemainQuota, &unlim, &t.MaxConcurrent, &t.RPM,
 			&t.UsedQuota, &t.RequestCount, &t.ExpiresAt, &t.CreatedAt, &t.UpdatedAt, &t.LastUsedAt); err != nil {
 			return nil, err
 		}
@@ -190,6 +196,61 @@ func (s *Store) Delete(id string) error {
 		return ErrNotFound
 	}
 	return nil
+}
+
+// DeleteMany 批量删除令牌（单事务）。返回实际删除数量。
+func (s *Store) DeleteMany(ids []string) (int, error) {
+	if s == nil {
+		return 0, fmt.Errorf("clients: nil store")
+	}
+	seen := make(map[string]struct{}, len(ids))
+	clean := make([]string, 0, len(ids))
+	for _, raw := range ids {
+		id := strings.TrimSpace(raw)
+		if id == "" {
+			continue
+		}
+		if _, dup := seen[id]; dup {
+			continue
+		}
+		seen[id] = struct{}{}
+		clean = append(clean, id)
+	}
+	if len(clean) == 0 {
+		return 0, fmt.Errorf("clients: empty ids")
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	tx, err := s.db.Begin()
+	if err != nil {
+		return 0, err
+	}
+	defer func() { _ = tx.Rollback() }()
+	deleted := 0
+	const chunk = 400
+	for i := 0; i < len(clean); i += chunk {
+		j := i + chunk
+		if j > len(clean) {
+			j = len(clean)
+		}
+		part := clean[i:j]
+		ph := make([]string, len(part))
+		args := make([]any, len(part))
+		for k, id := range part {
+			ph[k] = "?"
+			args[k] = id
+		}
+		res, err := tx.Exec(`DELETE FROM api_tokens WHERE id IN (`+strings.Join(ph, ",")+`)`, args...)
+		if err != nil {
+			return 0, err
+		}
+		n, _ := res.RowsAffected()
+		deleted += int(n)
+	}
+	if err := tx.Commit(); err != nil {
+		return 0, err
+	}
+	return deleted, nil
 }
 
 // SetEnabled 启用/禁用。

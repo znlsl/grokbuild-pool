@@ -2,12 +2,15 @@ package clients
 
 import "time"
 
-// Token 客户端 API 密钥记录。创建后不保存明文。
+// Token 客户端 API 密钥记录。
+// 管理台可展开查看明文（api_key）；鉴权仍以 key_hash 为准。
 type Token struct {
 	ID             string `json:"id"`
 	Name           string `json:"name"`
 	KeyPrefix      string `json:"key_prefix"` // 展示用前缀，如 sk-ab12…
 	KeyHash        string `json:"-"`
+	// APIKey 明文密钥（仅管理端 List/Create 返回；旧库无存盘时为空）。
+	APIKey         string `json:"api_key,omitempty"`
 	Enabled        bool   `json:"enabled"`
 	RemainQuota    int64  `json:"remain_quota"` // 有限额度；与 UnlimitedQuota 联用
 	UnlimitedQuota bool   `json:"unlimited_quota"`

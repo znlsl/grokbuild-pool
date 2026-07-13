@@ -8,6 +8,7 @@ build:
 	@mkdir -p $(BIN)
 	CGO_ENABLED=0 $(GO) build -trimpath -ldflags="-s -w" -o $(BIN)/poolctl ./cmd/poolctl
 	CGO_ENABLED=0 $(GO) build -trimpath -ldflags="-s -w" -o $(BIN)/pool-proxy ./cmd/pool-proxy
+	CGO_ENABLED=0 $(GO) build -trimpath -ldflags="-s -w" -o $(BIN)/render-config ./cmd/render-config
 
 docker:
 	docker build -t $(IMAGE) .

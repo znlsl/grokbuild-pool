@@ -138,8 +138,9 @@ func ImportFiles(ctx context.Context, cat CatalogWriter, files []InputFile, cfg 
 	results := make(chan result, len(files))
 
 	workers := cfg.Workers
-	if cfg.MaxEntries > 0 {
-		// 有总条目上限时串行解析，避免多文件预读放大内存，并在校验通过前不落库。
+	// 多文件 + 总条目上限时串行，避免多文件同时预读放大内存。
+	// 单文件则保持并行（SSO/JSON 内部还会再拆批）。
+	if cfg.MaxEntries > 0 && len(files) > 1 {
 		workers = 1
 	}
 	if workers > len(files) {
@@ -242,7 +243,8 @@ func ImportFiles(ctx context.Context, cat CatalogWriter, files []InputFile, cfg 
 			for _, a := range deduped {
 				writeBuf = append(writeBuf, a)
 				totalOK++
-				if cfg.MaxEntries <= 0 && len(writeBuf) >= cfg.Batch {
+				// 始终按 batch 边解析边落库，避免万级账号攒到最后才写导致卡顿/OOM
+				if len(writeBuf) >= cfg.Batch {
 					if err := flush(); err != nil {
 						return Report{}, err
 					}
@@ -257,20 +259,7 @@ func ImportFiles(ctx context.Context, cat CatalogWriter, files []InputFile, cfg 
 			}
 		}
 	}
-	_, atomicImport := cat.(importedCatalogWriter)
-	if cfg.MaxEntries > 0 && !atomicImport && len(writeBuf) > cfg.Batch {
-		accounts := writeBuf
-		for start := 0; start < len(accounts); start += cfg.Batch {
-			end := start + cfg.Batch
-			if end > len(accounts) {
-				end = len(accounts)
-			}
-			writeBuf = accounts[start:end:end]
-			if err := flush(); err != nil {
-				return Report{}, err
-			}
-		}
-	} else if err := flush(); err != nil {
+	if err := flush(); err != nil {
 		return Report{}, err
 	}
 

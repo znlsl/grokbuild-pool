@@ -1254,3 +1254,25 @@ body.nav-open {
   align-items: center;
   gap: 8px;
 }
+
+/* Token expand / detail */
+tr.tok-detail-row td {
+  background: var(--color-bg-subtle);
+  padding: 10px 12px;
+  border-top: none;
+}
+.tok-detail {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+  word-break: break-all;
+  font-size: 13px;
+}
+.tok-expand {
+  min-width: 28px;
+  padding: 0 6px;
+}
+tr.tok-detail-row.hidden {
+  display: none;
+}

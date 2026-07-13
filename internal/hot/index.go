@@ -366,6 +366,25 @@ func (idx *Index) Demote(id string) error {
 	return nil
 }
 
+// DemoteMany 批量移出热集（单锁），比循环 Demote 更适合管理台批量禁用/删除。
+func (idx *Index) DemoteMany(ids []string) {
+	if len(ids) == 0 {
+		return
+	}
+	idx.mu.Lock()
+	defer idx.mu.Unlock()
+	if idx.closed {
+		return
+	}
+	for _, id := range ids {
+		if id == "" {
+			continue
+		}
+		delete(idx.hot, id)
+		idx.removeLocked(id)
+	}
+}
+
 // Eligible 返回在时刻 now 通过选号过滤的热元数据副本
 //（unix 秒；now<=0 时用 time.Now().Unix()）：
 //

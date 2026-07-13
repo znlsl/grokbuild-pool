@@ -1,7 +1,7 @@
 # pool-proxy 示例配置
 # Docker 部署时 data_dir 建议使用 /data
 
-listen: "0.0.0.0:18080"
+listen: "0.0.0.0:8080"
 allow_public_listen: true
 
 # 数据目录：账号库、tokens.db、settings.json、导入暂存
@@ -86,8 +86,9 @@ anthropic:
 
 imports:
   enabled: true
-  max_upload_bytes: 33554432
-  max_request_bytes: 34603008
+  # 上传体积放宽；实际闸门以 max_entries（默认 1 万条）为主
+  max_upload_bytes: 268435456
+  max_request_bytes: 269484032
   max_entries: 10000
   max_ndjson_line_bytes: 1048576
   max_sso_value_bytes: 16384

@@ -805,9 +805,9 @@
     var defR = d.token_default_rpm != null ? d.token_default_rpm : 0;
     var defU = d.token_default_unlimited ? "1" : "0";
     $("main").innerHTML = wrapPage(
-      pageHd("令牌", "new-api 风格发放 · 明文仅创建时可见", "") +
+      pageHd("令牌", "new-api 风格 · 可展开查看密钥 · 支持批量复制", "") +
       '<div class="panel"><div class="panel-title">快速创建</div>' +
-      '<p class="muted" style="margin-bottom:12px">默认值来自「参数」页模板，可覆盖。</p>' +
+      '<p class="muted" style="margin-bottom:12px">默认值来自「参数」页模板，可覆盖。创建后可在列表展开详情再次查看密钥。</p>' +
       '<div class="form-row">' +
       '<div><label for="tName">名称</label><input id="tName" class="input" value="client" /></div>' +
       '<div><label for="tCount">数量 (1-100)</label><input id="tCount" class="input" type="number" value="1" min="1" max="100" /></div>' +
@@ -821,6 +821,12 @@
       '<button class="page-action-btn" id="tokRefresh" type="button">刷新列表</button></div>' +
       '<div id="onceBox"></div></div>' +
       '<div class="section-head"><div class="section-title">令牌列表<span class="section-count-badge" id="tokCount">0</span></div></div>' +
+      '<div class="toolbar acc-batch-bar" style="margin-bottom:8px">' +
+      '<button type="button" class="btn btn-sm btn-secondary" id="tokSelectAll" disabled>全选</button>' +
+      '<button type="button" class="btn btn-sm btn-secondary" id="tokSelectNone" disabled>清空</button>' +
+      '<button type="button" class="btn btn-sm btn-secondary" id="tokCopySelected" disabled>批量复制密钥</button>' +
+      '<button type="button" class="btn btn-sm btn-danger" id="tokBatchDelete" disabled>批量删除</button>' +
+      '<span class="muted" id="tokSelCount">已选 0</span></div>' +
       '<div id="tokTable"><div class="empty">加载中…</div></div>'
     );
 
@@ -837,12 +843,7 @@
       if (btn) btn.disabled = true;
       api("/admin/tokens", { method: "POST", body: body }).then(function (res) {
         var keys = extractPlainKeys(res);
-        var html = '<p class="muted">明文密钥仅显示一次，请立即复制：</p>';
-        keys.forEach(function (k) {
-          html += '<div class="once-key">' + esc(k) + "</div>";
-        });
-        var box = $("onceBox");
-        if (box) box.innerHTML = html;
+        bindOnceBox(keys);
         if (keys[0]) {
           copyText(keys.join("\n")).then(function () {
             toast("已创建并复制到剪贴板", true);
@@ -861,9 +862,87 @@
       });
     });
     $("tokRefresh").addEventListener("click", loadTokens);
+    $("tokSelectAll").addEventListener("click", function () {
+      document.querySelectorAll("#tokTable input.tok-check").forEach(function (cb) { cb.checked = true; });
+      var master = $("tokCheckAll");
+      if (master) master.checked = true;
+      updateTokSelUI();
+    });
+    $("tokSelectNone").addEventListener("click", function () {
+      document.querySelectorAll("#tokTable input.tok-check").forEach(function (cb) { cb.checked = false; });
+      var master = $("tokCheckAll");
+      if (master) master.checked = false;
+      updateTokSelUI();
+    });
+    $("tokCopySelected").addEventListener("click", function () {
+      var keys = selectedTokenKeys();
+      if (!keys.length) {
+        toast("请先勾选有明文密钥的令牌（旧令牌可能无存盘）", false);
+        return;
+      }
+      copyText(keys.join("\n")).then(function () {
+        toast("已复制 " + keys.length + " 把密钥", true);
+      }).catch(function () {
+        toast("复制失败，请手动展开复制", false);
+      });
+    });
+    $("tokBatchDelete").addEventListener("click", function () {
+      var ids = selectedTokenIds();
+      if (!ids.length) {
+        toast("请先勾选令牌", false);
+        return;
+      }
+      var btn = $("tokBatchDelete");
+      if (btn) btn.disabled = true;
+      var t0 = Date.now();
+      api("/admin/tokens/batch", {
+        method: "POST",
+        body: { action: "delete", ids: ids }
+      }).then(function (res) {
+        var ok = res && res.ok != null ? res.ok : 0;
+        toast("批量删除：成功 " + ok + "（" + (Date.now() - t0) + "ms）", true);
+        loadTokens();
+      }).catch(function (e) {
+        if (handleAuthError(e)) return;
+        toast(e.message || "批量删除失败", false);
+        updateTokSelUI();
+      });
+    });
     loadTokens();
   }
 
+  function selectedTokenIds() {
+    var ids = [];
+    document.querySelectorAll("#tokTable input.tok-check:checked").forEach(function (cb) {
+      var id = cb.getAttribute("data-id");
+      if (id) ids.push(id);
+    });
+    return ids;
+  }
+
+  function selectedTokenKeys() {
+    var keys = [];
+    document.querySelectorAll("#tokTable input.tok-check:checked").forEach(function (cb) {
+      var k = cb.getAttribute("data-key") || "";
+      if (k) keys.push(k);
+    });
+    return keys;
+  }
+
+  function updateTokSelUI() {
+    var n = selectedTokenIds().length;
+    var label = $("tokSelCount");
+    if (label) label.textContent = "已选 " + n;
+    var any = document.querySelectorAll("#tokTable input.tok-check").length > 0;
+    var sa = $("tokSelectAll");
+    if (sa) sa.disabled = !any;
+    var sn = $("tokSelectNone");
+    if (sn) sn.disabled = n === 0;
+    var cp = $("tokCopySelected");
+    if (cp) cp.disabled = selectedTokenKeys().length === 0;
+    var bd = $("tokBatchDelete");
+    if (bd) bd.disabled = n === 0;
+  }
 
   function loadTokens() {
     var host = $("tokTable");
@@ -871,10 +950,12 @@
     if (!host) return;
     api("/admin/tokens").then(function (res) {
       var list = res.tokens || [];
+      if (cnt) cnt.textContent = String(list.length);
       if (!list.length) {
         host.innerHTML =
           '<div class="empty"><strong>暂无令牌</strong>' +
-          "使用上方表单快速创建，明文密钥仅显示一次。</div>";
+          "使用上方表单快速创建；创建后可展开详情查看密钥。</div>";
+        updateTokSelUI();
         return;
       }
       var rows = list.map(function (t) {
@@ -882,7 +963,16 @@
           ? '<span class="badge on">启用</span>'
           : '<span class="badge off">禁用</span>';
         var quota = t.unlimited_quota ? "∞" : String(t.remain_quota != null ? t.remain_quota : 0);
-        return "<tr>" +
+        var key = t.api_key || t.plaintext || "";
+        var detail = key
+          ? '<div class="tok-detail mono">' + esc(key) +
+            ' <button type="button" class="btn btn-sm btn-secondary" data-act="copy" data-key="' +
+            esc(key) + '">复制</button></div>'
+          : '<div class="tok-detail muted">旧令牌未存盘明文（重新创建后可展开查看）</div>';
+        return '<tr class="tok-row" data-id="' + esc(t.id) + '">' +
+          '<td><input type="checkbox" class="tok-check" data-id="' + esc(t.id) +
+            '" data-key="' + esc(key) + '" /></td>' +
+          '<td><button type="button" class="btn btn-sm btn-ghost tok-expand" data-act="expand" aria-expanded="false">▸</button></td>' +
           '<td class="mono">' + esc(t.id) + "</td>" +
           "<td>" + esc(t.name) + "</td>" +
           '<td class="mono">' + esc(t.key_prefix) + "</td>" +
@@ -900,18 +990,53 @@
               esc(t.id) + '">启用</button>') +
           '<button type="button" class="btn btn-sm btn-danger" data-act="del" data-id="' +
             esc(t.id) + '">删除</button>' +
-          "</td></tr>";
+          "</td></tr>" +
+          '<tr class="tok-detail-row hidden" data-for="' + esc(t.id) + '"><td colspan="11">' +
+          detail + "</td></tr>";
       }).join("");
       host.innerHTML =
         '<div class="table-wrap"><table><thead><tr>' +
-        "<th>ID</th><th>名称</th><th>前缀</th><th>状态</th><th>额度</th>" +
+        '<th><input type="checkbox" id="tokCheckAll" title="全选" /></th>' +
+        "<th></th><th>ID</th><th>名称</th><th>前缀</th><th>状态</th><th>额度</th>" +
         "<th>并发</th><th>RPM</th><th>已用/请求</th><th></th>" +
         "</tr></thead><tbody>" + rows + "</tbody></table></div>";
 
+      var master = $("tokCheckAll");
+      if (master) {
+        master.addEventListener("change", function () {
+          var on = !!master.checked;
+          host.querySelectorAll("input.tok-check").forEach(function (cb) { cb.checked = on; });
+          updateTokSelUI();
+        });
+      }
+      host.querySelectorAll("input.tok-check").forEach(function (cb) {
+        cb.addEventListener("change", updateTokSelUI);
+      });
+      updateTokSelUI();
+
       host.querySelectorAll("button[data-act]").forEach(function (btn) {
         btn.addEventListener("click", function () {
-          var id = btn.getAttribute("data-id");
           var act = btn.getAttribute("data-act");
+          if (act === "expand") {
+            var row = btn.closest("tr");
+            var id = row && row.getAttribute("data-id");
+            if (!id) return;
+            var detailRow = host.querySelector('tr.tok-detail-row[data-for="' + id + '"]');
+            if (!detailRow) return;
+            var open = detailRow.classList.contains("hidden");
+            detailRow.classList.toggle("hidden", !open);
+            btn.textContent = open ? "▾" : "▸";
+            btn.setAttribute("aria-expanded", open ? "true" : "false");
+            return;
+          }
+          if (act === "copy") {
+            var k = btn.getAttribute("data-key") || "";
+            if (!k) return;
+            copyText(k).then(function () { toast("已复制密钥", true); })
+              .catch(function () { toast("复制失败", false); });
+            return;
+          }
+          var id = btn.getAttribute("data-id");
           if (!id) return;
           btn.disabled = true;
           var p;
@@ -945,6 +1070,7 @@
       host.innerHTML =
         '<div class="err-box">加载令牌失败：' + esc(e.message) + "</div>";
       toast(e.message, false);
+      updateTokSelUI();
     });
   }
 
@@ -958,7 +1084,8 @@
     accCursorStack = [];
     accPageIndex = 1;
     $("main").innerHTML = wrapPage(
-      pageHd("账户管理", "冷存储脱敏列表 · 启停同步热池 · 批量最多 500",
+      pageHd("账户管理", "冷存储脱敏列表 · 启停同步热池 · 批量最多 500 · 后端导出自动分片合并",
+        '<button type="button" class="page-action-btn" id="accExport">导出 JSON</button>' +
         '<button type="button" class="page-action-btn" id="accRefresh">刷新</button>') +
       '<div class="panel">' +
       '<div class="toolbar acc-batch-bar">' +
@@ -966,6 +1093,7 @@
       '<button type="button" class="btn btn-sm btn-secondary" id="accSelectNone" disabled>清空</button>' +
       '<button type="button" class="btn btn-sm btn-secondary" id="accBatchEnable" disabled>批量启用</button>' +
       '<button type="button" class="btn btn-sm btn-danger" id="accBatchDisable" disabled>批量禁用</button>' +
+      '<button type="button" class="btn btn-sm btn-danger" id="accBatchDelete" disabled>批量删除</button>' +
       '<span class="muted" id="accSelCount">已选 0</span>' +
       '<span class="toolbar-spacer"></span>' +
       '<label class="acc-page-size-label" for="accPageSize">每页</label>' +
@@ -986,6 +1114,37 @@
     $("accRefresh").addEventListener("click", function () {
       // 刷新保持当前页 cursor
       loadAccounts();
+    });
+    $("accExport").addEventListener("click", function () {
+      // 后端按 chunk 从库抽取并流式整合成单一文件；前端只触发下载
+      var url = "/admin/accounts/export?format=json&chunk=500";
+      fetch(url, {
+        method: "GET",
+        headers: { "X-Admin-Key": adminKey || "" }
+      }).then(function (resp) {
+        if (!resp.ok) {
+          return resp.text().then(function (t) {
+            throw new Error(t || ("export HTTP " + resp.status));
+          });
+        }
+        var total = resp.headers.get("X-Export-Total") || "";
+        return resp.blob().then(function (blob) {
+          return { blob: blob, total: total };
+        });
+      }).then(function (pack) {
+        var a = document.createElement("a");
+        var obj = URL.createObjectURL(pack.blob);
+        a.href = obj;
+        a.download = "accounts-export.json";
+        document.body.appendChild(a);
+        a.click();
+        a.remove();
+        setTimeout(function () { URL.revokeObjectURL(obj); }, 2000);
+        toast("导出完成" + (pack.total ? "（共 " + pack.total + " 条）" : ""), true);
+      }).catch(function (e) {
+        if (handleAuthError(e)) return;
+        toast(e.message || "导出失败", false);
+      });
     });
     $("accSelectAll").addEventListener("click", function () {
       document.querySelectorAll("#accTable input.acc-check").forEach(function (cb) {
@@ -1008,6 +1167,9 @@
     });
     $("accBatchDisable").addEventListener("click", function () {
       runBatchAccounts("disable");
+    });
+    $("accBatchDelete").addEventListener("click", function () {
+      runBatchAccounts("delete");
     });
     $("accPrev").addEventListener("click", function () {
       if (!accCursorStack.length || accLoading) return;
@@ -1076,6 +1238,8 @@
     if (be) be.disabled = n === 0;
     var bd = $("accBatchDisable");
     if (bd) bd.disabled = n === 0;
+    var bdel = $("accBatchDelete");
+    if (bdel) bdel.disabled = n === 0;
   }
 
   function runBatchAccounts(action) {
@@ -1088,19 +1252,21 @@
       toast("单次最多 500 个", false);
       return;
     }
-    var btns = ["accBatchEnable", "accBatchDisable", "accSelectAll", "accSelectNone"];
+    var btns = ["accBatchEnable", "accBatchDisable", "accBatchDelete", "accSelectAll", "accSelectNone"];
     btns.forEach(function (id) {
       var el = $(id);
       if (el) el.disabled = true;
     });
+    var t0 = Date.now();
     api("/admin/accounts/batch", {
       method: "POST",
       body: { action: action, ids: ids }
     }).then(function (res) {
       var ok = res && res.ok != null ? res.ok : 0;
       var failed = res && res.failed != null ? res.failed : 0;
-      var verb = action === "enable" ? "启用" : "禁用";
-      toast("批量" + verb + "：成功 " + ok + (failed ? "，失败 " + failed : ""), failed === 0);
+      var verb = action === "enable" ? "启用" : action === "delete" ? "删除" : "禁用";
+      var ms = Date.now() - t0;
+      toast("批量" + verb + "：成功 " + ok + (failed ? "，失败 " + failed : "") + "（" + ms + "ms）", failed === 0);
       loadAccounts();
     }).catch(function (e) {
       if (handleAuthError(e)) return;
@@ -1247,16 +1413,17 @@
       '<div id="impErr"></div>' +
       '<div class="form-row">' +
       '<div><label for="impFormat">格式</label>' +
-      '<select id="impFormat" class="input"><option value="json">JSON</option><option value="ndjson">NDJSON</option><option value="sso">SSO</option></select></div>' +
+      '<select id="impFormat" class="input"><option value="sso" selected>SSO</option><option value="json">JSON</option><option value="ndjson">NDJSON</option></select></div>' +
       '<div><label for="impFile">本地文件</label>' +
-      '<input id="impFile" class="input file-input" type="file" accept=".json,application/json" /></div></div>' +
-      '<p class="muted panel-note import-limit-note" id="impLimits">单文件上传，正在读取服务端限制…</p>' +
+      '<input id="impFile" class="input file-input" type="file" accept=".txt,.json,text/plain,application/json" /></div></div>' +
+      '<p class="muted panel-note import-limit-note" id="impLimits">默认 SSO · 最多 10000 条 · 正在读取服务端限制…</p>' +
       '<div class="toolbar form-actions">' +
       '<button type="button" class="btn btn-primary" id="impSubmit">上传并创建任务</button></div></div>' +
       '<div class="section-head"><div class="section-title">任务列表</div></div>' +
       '<div id="impTable"><div class="empty">加载中…</div></div>'
     );
-    var importMaxUpload = 32 * 1024 * 1024;
+    var importMaxUpload = 256 * 1024 * 1024;
+    var importMaxEntries = 10000;
 
     function setImportError(message) {
       var host = $("impErr");
@@ -1281,10 +1448,12 @@
         var limits = (res && res.limits) || {};
         var note = $("impLimits");
         if (limits.max_upload_bytes) importMaxUpload = Number(limits.max_upload_bytes) || importMaxUpload;
+        if (limits.max_entries) importMaxEntries = Number(limits.max_entries) || importMaxEntries;
         if (note) {
-          var maxMB = Math.round(importMaxUpload / 1048576);
-          note.textContent = "最大 " + maxMB + " MiB · 最多 " + (limits.max_entries || 10000) +
-            " 条 · SSO 转换器" + (limits.sso_converter_configured ? "已配置" : "未配置");
+          // 以条数为主闸门；体积上限仅作兜底提示
+          note.textContent = "默认 SSO · 最多 " + importMaxEntries +
+            " 条 · 体积兜底 " + Math.round(importMaxUpload / 1048576) + " MiB · 转换器" +
+            (limits.sso_converter_configured ? "已配置" : "未配置（SSO 需配置后可用）");
         }
         var host = $("impTable");
         if (!host) return;

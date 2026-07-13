@@ -451,6 +451,172 @@ WHERE id = ? AND revision = ?`
 	return fmt.Errorf("%w: id=%s expected_rev=%d", ErrCASConflict, id, expectedRev)
 }
 
+// BatchSetManualEnabled 批量手动启停：单事务一次 UPDATE … WHERE id IN (…)
+// 比逐条 PatchHealth（每条读-改-写）快一个数量级，专供管理台批量操作。
+// 返回实际命中的 id 列表（不存在的 id 不会出现在 ok 中）。
+func (c *Catalog) BatchSetManualEnabled(ids []string, enable bool) (okIDs []string, err error) {
+	if c.db == nil {
+		return nil, ErrClosed
+	}
+	// 规范化
+	seen := make(map[string]struct{}, len(ids))
+	clean := make([]string, 0, len(ids))
+	for _, raw := range ids {
+		id := strings.TrimSpace(raw)
+		if id == "" {
+			continue
+		}
+		if _, dup := seen[id]; dup {
+			continue
+		}
+		seen[id] = struct{}{}
+		clean = append(clean, id)
+	}
+	if len(clean) == 0 {
+		return nil, fmt.Errorf("%w: empty ids", ErrInvalidInput)
+	}
+
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	tx, err := c.db.Begin()
+	if err != nil {
+		return nil, fmt.Errorf("catalog: begin batch enable: %w", err)
+	}
+	defer func() { _ = tx.Rollback() }()
+
+	// SQLite 变量上限约 999；分块更新
+	const chunk = 400
+	now := time.Now().Unix()
+	en := boolToInt(enable)
+	manual := boolToInt(!enable)
+	okIDs = make([]string, 0, len(clean))
+	for i := 0; i < len(clean); i += chunk {
+		j := i + chunk
+		if j > len(clean) {
+			j = len(clean)
+		}
+		part := clean[i:j]
+		ph := make([]string, len(part))
+		args := make([]any, 0, 4+len(part))
+		args = append(args, en, manual, now)
+		for k, id := range part {
+			ph[k] = "?"
+			args = append(args, id)
+		}
+		q := `UPDATE accounts SET enabled = ?, manual_disabled = ?, revision = revision + 1, updated_at = ?
+WHERE id IN (` + strings.Join(ph, ",") + `)`
+		if _, err := tx.Exec(q, args...); err != nil {
+			return nil, fmt.Errorf("catalog: batch set enabled: %w", err)
+		}
+		// 查出实际存在的 id
+		sel := `SELECT id FROM accounts WHERE id IN (` + strings.Join(ph, ",") + `)`
+		selArgs := make([]any, len(part))
+		for k, id := range part {
+			selArgs[k] = id
+		}
+		rows, err := tx.Query(sel, selArgs...)
+		if err != nil {
+			return nil, fmt.Errorf("catalog: batch select: %w", err)
+		}
+		for rows.Next() {
+			var id string
+			if err := rows.Scan(&id); err != nil {
+				rows.Close()
+				return nil, err
+			}
+			okIDs = append(okIDs, id)
+		}
+		rows.Close()
+		if err := rows.Err(); err != nil {
+			return nil, err
+		}
+	}
+	if err := tx.Commit(); err != nil {
+		return nil, fmt.Errorf("catalog: commit batch enable: %w", err)
+	}
+	return okIDs, nil
+}
+
+// BatchDelete 物理删除账号（单事务），返回实际删除的 id。
+func (c *Catalog) BatchDelete(ids []string) (deleted []string, err error) {
+	if c.db == nil {
+		return nil, ErrClosed
+	}
+	seen := make(map[string]struct{}, len(ids))
+	clean := make([]string, 0, len(ids))
+	for _, raw := range ids {
+		id := strings.TrimSpace(raw)
+		if id == "" {
+			continue
+		}
+		if _, dup := seen[id]; dup {
+			continue
+		}
+		seen[id] = struct{}{}
+		clean = append(clean, id)
+	}
+	if len(clean) == 0 {
+		return nil, fmt.Errorf("%w: empty ids", ErrInvalidInput)
+	}
+
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	tx, err := c.db.Begin()
+	if err != nil {
+		return nil, fmt.Errorf("catalog: begin batch delete: %w", err)
+	}
+	defer func() { _ = tx.Rollback() }()
+
+	const chunk = 400
+	deleted = make([]string, 0, len(clean))
+	for i := 0; i < len(clean); i += chunk {
+		j := i + chunk
+		if j > len(clean) {
+			j = len(clean)
+		}
+		part := clean[i:j]
+		ph := make([]string, len(part))
+		args := make([]any, len(part))
+		for k, id := range part {
+			ph[k] = "?"
+			args[k] = id
+		}
+		// 先记下存在的
+		sel := `SELECT id FROM accounts WHERE id IN (` + strings.Join(ph, ",") + `)`
+		rows, err := tx.Query(sel, args...)
+		if err != nil {
+			return nil, fmt.Errorf("catalog: batch delete select: %w", err)
+		}
+		var hit []string
+		for rows.Next() {
+			var id string
+			if err := rows.Scan(&id); err != nil {
+				rows.Close()
+				return nil, err
+			}
+			hit = append(hit, id)
+		}
+		rows.Close()
+		if err := rows.Err(); err != nil {
+			return nil, err
+		}
+		if len(hit) == 0 {
+			continue
+		}
+		del := `DELETE FROM accounts WHERE id IN (` + strings.Join(ph, ",") + `)`
+		if _, err := tx.Exec(del, args...); err != nil {
+			return nil, fmt.Errorf("catalog: batch delete: %w", err)
+		}
+		deleted = append(deleted, hit...)
+	}
+	if err := tx.Commit(); err != nil {
+		return nil, fmt.Errorf("catalog: commit batch delete: %w", err)
+	}
+	return deleted, nil
+}
+
 // PatchHealth 应用部分健康更新，并将 revision 加 1。
 func (c *Catalog) PatchHealth(id string, patch HealthPatch) error {
 	if c.db == nil {

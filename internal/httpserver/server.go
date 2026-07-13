@@ -211,7 +211,7 @@ func handleRoot(w http.ResponseWriter, r *http.Request, version string) {
 	if version != "" {
 		msg += " " + version
 	}
-	msg += "\nlisten-default: 127.0.0.1:18080 (production :8080 untouched)\n"
+	msg += "\nlisten-default: 0.0.0.0:8080\n"
 	_, _ = w.Write([]byte(msg))
 }
 

@@ -17,8 +17,8 @@ import (
 )
 
 const (
-	// DefaultListen 仅 loopback，有意避开生产 :8080。
-	DefaultListen = "127.0.0.1:18080"
+	// DefaultListen 为 Docker / 自托管默认端口。
+	DefaultListen = "0.0.0.0:8080"
 	// DefaultDataDir 为 Scheme B 本地数据根目录。
 	DefaultDataDir = "./data"
 	// DefaultHotSize 为热索引目标容量。
@@ -32,7 +32,8 @@ const (
 	// DefaultMaxAttempts 为 lease 失败切换预算。
 	DefaultMaxAttempts = 6
 	// Admin 浏览器导入默认资源限制。
-	DefaultImportMaxUploadBytes     = 32 << 20
+	// 上传体积放宽到 256 MiB，实际以 max_entries=10000 条为主要闸门。
+	DefaultImportMaxUploadBytes     = 256 << 20
 	DefaultImportRequestOverhead    = 1 << 20
 	DefaultImportMaxRequestBytes    = DefaultImportMaxUploadBytes + DefaultImportRequestOverhead
 	DefaultImportMaxEntries         = 10_000
@@ -164,12 +165,12 @@ type LoggingConfig struct {
 	Level string `yaml:"level"`
 }
 
-// Default 返回 Scheme B 默认值（监听 127.0.0.1:18080，热 3000，max_concurrent 120）。
+// Default 返回默认值（监听 0.0.0.0:8080，热 3000，max_concurrent 120）。
 func Default() Config {
 	proto := protocolconfig.Default()
 	return Config{
 		Listen:            DefaultListen,
-		AllowPublicListen: false,
+		AllowPublicListen: true,
 		DataDir:           DefaultDataDir,
 		DBPath:            "",
 		APIKey:            "",
@@ -496,10 +497,6 @@ func (c Config) ValidateListen(addr string) error {
 	}
 	if strings.TrimSpace(port) == "" {
 		return fmt.Errorf("config: listen %q: missing port", addr)
-	}
-	// 生产隔离：绝不静默绑定所有接口上的 :8080。
-	if port == "8080" && (host == "0.0.0.0" || host == "::" || host == "") {
-		return fmt.Errorf("config: refusing public bind on production port 8080 (use 127.0.0.1:18080)")
 	}
 	if c.AllowPublicListen {
 		return nil

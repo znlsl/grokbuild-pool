@@ -82,6 +82,7 @@ func (h *Handlers) Mount(mux *http.ServeMux) {
 	mux.HandleFunc("GET /admin/pool/stats", h.RequireAdmin(h.PoolStats))
 	mux.HandleFunc("GET /admin/tokens", h.RequireAdmin(h.ListTokens))
 	mux.HandleFunc("POST /admin/tokens", h.RequireAdmin(h.CreateTokens))
+	mux.HandleFunc("POST /admin/tokens/batch", h.RequireAdmin(h.BatchTokens))
 	mux.HandleFunc("DELETE /admin/tokens/{id}", h.RequireAdmin(h.DeleteToken))
 	mux.HandleFunc("POST /admin/tokens/{id}/disable", h.RequireAdmin(h.DisableToken))
 	mux.HandleFunc("POST /admin/tokens/{id}/enable", h.RequireAdmin(h.EnableToken))
@@ -89,9 +90,10 @@ func (h *Handlers) Mount(mux *http.ServeMux) {
 	mux.HandleFunc("GET /admin/config", h.RequireAdmin(h.SafeConfig))
 	mux.HandleFunc("GET /admin/settings", h.RequireAdmin(h.GetSettings))
 	mux.HandleFunc("PUT /admin/settings", h.RequireAdmin(h.PutSettings))
-	// 账号目录（脱敏分页 / 手动启停 / 批量 / 代理）
+	// 账号目录（脱敏分页 / 手动启停 / 批量 / 代理 / 导出）
 	mux.HandleFunc("GET /admin/accounts", h.RequireAdmin(h.ListAccounts))
-	// 批量路由须先于 /{id}/… 注册习惯：Go 1.22 模式不冲突，显式 batch 更清晰
+	// 导出与批量路由须先于 /{id}/… 注册
+	mux.HandleFunc("GET /admin/accounts/export", h.RequireAdmin(h.ExportAccounts))
 	mux.HandleFunc("POST /admin/accounts/batch", h.RequireAdmin(h.BatchAccounts))
 	mux.HandleFunc("POST /admin/accounts/{id}/disable", h.RequireAdmin(h.DisableAccount))
 	mux.HandleFunc("POST /admin/accounts/{id}/enable", h.RequireAdmin(h.EnableAccount))
@@ -172,7 +174,7 @@ func (h *Handlers) PoolStats(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, out)
 }
 
-// ListTokens 列出令牌（仅前缀，无明文）。
+// ListTokens 列出令牌（含 api_key 明文供管理台展开/批量复制；旧令牌可能为空）。
 func (h *Handlers) ListTokens(w http.ResponseWriter, r *http.Request) {
 	if h.Tokens == nil {
 		writeErr(w, http.StatusServiceUnavailable, "令牌存储未启用")
@@ -253,6 +255,47 @@ func (h *Handlers) DeleteToken(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"deleted": id})
+}
+
+// BatchTokens POST /admin/tokens/batch
+// body: {"action":"delete","ids":["..."]}，ids 上限 500；单事务批量删除。
+func (h *Handlers) BatchTokens(w http.ResponseWriter, r *http.Request) {
+	if h.Tokens == nil {
+		writeErr(w, http.StatusServiceUnavailable, "令牌存储未启用")
+		return
+	}
+	var body struct {
+		Action string   `json:"action"`
+		IDs    []string `json:"ids"`
+	}
+	if err := decodeJSON(r, 1<<20, &body); err != nil {
+		writeErr(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	action := strings.ToLower(strings.TrimSpace(body.Action))
+	if action != "delete" {
+		writeErr(w, http.StatusBadRequest, "action 目前仅支持 delete")
+		return
+	}
+	if len(body.IDs) == 0 {
+		writeErr(w, http.StatusBadRequest, "ids 不能为空")
+		return
+	}
+	if len(body.IDs) > 500 {
+		writeErr(w, http.StatusBadRequest, "ids 最多 500 个")
+		return
+	}
+	n, err := h.Tokens.DeleteMany(body.IDs)
+	if err != nil {
+		writeErr(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{
+		"action":  action,
+		"ok":      n,
+		"failed":  len(body.IDs) - n,
+		"deleted": n,
+	})
 }
 
 // DisableToken 禁用。

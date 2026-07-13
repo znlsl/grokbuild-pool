@@ -10,6 +10,7 @@ import (
 	"net/http"
 	"net/url"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/yshgsh1343/grokbuild2api/internal/authimport"
@@ -32,7 +33,7 @@ type Config struct {
 	MaxBatch int
 	// Timeout 为单请求超时（默认 300s）。
 	Timeout time.Duration
-	// Workers 预留给并发批扇出（默认 1；外层 worker 由 bulkimport 管理）。
+	// Workers 为 Convert 内部 batch 并行度（默认 4，最大 16）。
 	Workers int
 	// AllowInsecure 允许 loopback/私网/单标签主机使用 http://。
 	AllowInsecure bool
@@ -86,7 +87,11 @@ func NewClient(cfg Config) (*Client, error) {
 		return nil, fmt.Errorf("ssoimport: timeout must not exceed %ds", maxTimeoutSec)
 	}
 	if cfg.Workers <= 0 {
-		cfg.Workers = 1
+		// 默认 4 路并行 batch，大文件导入时显著加速
+		cfg.Workers = 4
+	}
+	if cfg.Workers > 16 {
+		cfg.Workers = 16
 	}
 	if cfg.HTTPClient == nil {
 		cfg.HTTPClient = &http.Client{Timeout: cfg.Timeout}
@@ -104,6 +109,7 @@ func NewClient(cfg Config) (*Client, error) {
 }
 
 // Convert 分批将 SSO 值发给转换器并返回对齐结果。
+// 当 Workers>1 时按 batch 自动拆分并行请求，再按原序合并。
 func (c *Client) Convert(ctx context.Context, ssoValues []string) ([]ConvertedCredential, error) {
 	if c == nil {
 		return nil, ErrConverterRequired
@@ -111,18 +117,84 @@ func (c *Client) Convert(ctx context.Context, ssoValues []string) ([]ConvertedCr
 	if len(ssoValues) == 0 {
 		return []ConvertedCredential{}, nil
 	}
-	output := make([]ConvertedCredential, len(ssoValues))
 	maxBatch := c.cfg.MaxBatch
+	if maxBatch <= 0 {
+		maxBatch = 50
+	}
+	// 构造 batch 区间
+	type span struct{ start, end int }
+	spans := make([]span, 0, (len(ssoValues)+maxBatch-1)/maxBatch)
 	for start := 0; start < len(ssoValues); start += maxBatch {
 		end := start + maxBatch
 		if end > len(ssoValues) {
 			end = len(ssoValues)
 		}
-		converted, err := c.convertBatch(ctx, ssoValues[start:end])
-		if err != nil {
-			return nil, err
+		spans = append(spans, span{start, end})
+	}
+
+	output := make([]ConvertedCredential, len(ssoValues))
+	workers := c.cfg.Workers
+	if workers <= 1 || len(spans) == 1 {
+		for _, sp := range spans {
+			if err := ctx.Err(); err != nil {
+				return nil, err
+			}
+			converted, err := c.convertBatch(ctx, ssoValues[sp.start:sp.end])
+			if err != nil {
+				return nil, err
+			}
+			copy(output[sp.start:sp.end], converted)
 		}
-		copy(output[start:end], converted)
+		return output, nil
+	}
+	if workers > len(spans) {
+		workers = len(spans)
+	}
+
+	type job struct{ sp span }
+	type res struct {
+		sp   span
+		data []ConvertedCredential
+		err  error
+	}
+	jobs := make(chan job, len(spans))
+	results := make(chan res, len(spans))
+	var wg sync.WaitGroup
+	for w := 0; w < workers; w++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for j := range jobs {
+				if err := ctx.Err(); err != nil {
+					results <- res{sp: j.sp, err: err}
+					continue
+				}
+				converted, err := c.convertBatch(ctx, ssoValues[j.sp.start:j.sp.end])
+				results <- res{sp: j.sp, data: converted, err: err}
+			}
+		}()
+	}
+	go func() {
+		for _, sp := range spans {
+			jobs <- job{sp: sp}
+		}
+		close(jobs)
+		wg.Wait()
+		close(results)
+	}()
+
+	var firstErr error
+	for r := range results {
+		if r.err != nil {
+			if firstErr == nil {
+				firstErr = r.err
+			}
+			continue
+		}
+		copy(output[r.sp.start:r.sp.end], r.data)
+	}
+	if firstErr != nil {
+		return nil, firstErr
 	}
 	return output, nil
 }

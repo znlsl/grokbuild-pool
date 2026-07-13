@@ -18,6 +18,7 @@ type AccountHot interface {
 	Get(id string) (catalog.HotMeta, bool)
 	Promote(meta catalog.HotMeta) (demoted string, err error)
 	Demote(id string) error
+	DemoteMany(ids []string)
 }
 
 // ListAccounts GET /admin/accounts?cursor=&limit=
@@ -78,7 +79,8 @@ func (h *Handlers) EnableAccount(w http.ResponseWriter, r *http.Request) {
 }
 
 // BatchAccounts POST /admin/accounts/batch
-// body: {"action":"enable"|"disable","ids":["..."]}，ids 上限 500；admin 鉴权由 Mount 保证。
+// body: {"action":"enable"|"disable"|"delete","ids":["..."]}，ids 上限 500；admin 鉴权由 Mount 保证。
+// enable/disable/delete 均走单事务批量 SQL，避免逐条读改写导致管理台卡顿。
 func (h *Handlers) BatchAccounts(w http.ResponseWriter, r *http.Request) {
 	if h.Catalog == nil {
 		writeErr(w, http.StatusServiceUnavailable, "账号目录未启用")
@@ -93,14 +95,10 @@ func (h *Handlers) BatchAccounts(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	action := strings.ToLower(strings.TrimSpace(body.Action))
-	var enable bool
 	switch action {
-	case "enable":
-		enable = true
-	case "disable":
-		enable = false
+	case "enable", "disable", "delete":
 	default:
-		writeErr(w, http.StatusBadRequest, "action 须为 enable 或 disable")
+		writeErr(w, http.StatusBadRequest, "action 须为 enable、disable 或 delete")
 		return
 	}
 	// 规范化 id：去空白、去重、过滤空
@@ -126,26 +124,64 @@ func (h *Handlers) BatchAccounts(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	okIDs := make([]string, 0, len(ids))
+	var (
+		okIDs []string
+		err   error
+	)
+	switch action {
+	case "delete":
+		okIDs, err = h.Catalog.BatchDelete(ids)
+		if err != nil {
+			writeErr(w, http.StatusInternalServerError, err.Error())
+			return
+		}
+		if h.AccountHot != nil && len(okIDs) > 0 {
+			h.AccountHot.DemoteMany(okIDs)
+		}
+	case "enable":
+		okIDs, err = h.Catalog.BatchSetManualEnabled(ids, true)
+		if err != nil {
+			writeErr(w, http.StatusInternalServerError, err.Error())
+			return
+		}
+		// 启用时若已在热池则刷新 Enabled；不在热池的等下次 LoadEligible/Promote
+		if h.AccountHot != nil {
+			for _, id := range okIDs {
+				if meta, ok := h.AccountHot.Get(id); ok {
+					meta.Enabled = true
+					_, _ = h.AccountHot.Promote(meta)
+				}
+			}
+		}
+	case "disable":
+		okIDs, err = h.Catalog.BatchSetManualEnabled(ids, false)
+		if err != nil {
+			writeErr(w, http.StatusInternalServerError, err.Error())
+			return
+		}
+		if h.AccountHot != nil && len(okIDs) > 0 {
+			h.AccountHot.DemoteMany(okIDs)
+		}
+	}
+
+	// 汇总未命中 id
+	okSet := make(map[string]struct{}, len(okIDs))
+	for _, id := range okIDs {
+		okSet[id] = struct{}{}
+	}
 	failed := make([]map[string]string, 0)
 	for _, id := range ids {
-		if err := h.applyAccountManual(id, enable); err != nil {
-			msg := err.Error()
-			if errors.Is(err, catalog.ErrNotFound) {
-				msg = "账号不存在"
-			}
-			failed = append(failed, map[string]string{"id": id, "error": msg})
-			continue
+		if _, ok := okSet[id]; !ok {
+			failed = append(failed, map[string]string{"id": id, "error": "账号不存在"})
 		}
-		okIDs = append(okIDs, id)
 	}
 	writeJSON(w, http.StatusOK, map[string]any{
-		"action":  action,
-		"ok":      len(okIDs),
-		"failed":  len(failed),
-		"ids_ok":  okIDs,
-		"errors":  failed,
-		"limit":   maxBatchAccountIDs,
+		"action": action,
+		"ok":     len(okIDs),
+		"failed": len(failed),
+		"ids_ok": okIDs,
+		"errors": failed,
+		"limit":  maxBatchAccountIDs,
 	})
 }
 

@@ -5,7 +5,7 @@ services:
     container_name: grokbuild2api
     restart: unless-stopped
     ports:
-      - "18080:18080"
+      - "8080:8080"
     environment:
       # 必改：管理台密钥
       ADMIN_KEY: "${ADMIN_KEY:-}"
@@ -14,7 +14,7 @@ services:
       # true=内置 mock 上游；接真实 Grok 时改为 false 并设置 UPSTREAM_BASE_URL
       MOCK_UPSTREAM: "${MOCK_UPSTREAM:-true}"
       UPSTREAM_BASE_URL: "${UPSTREAM_BASE_URL:-}"
-      LISTEN: "0.0.0.0:18080"
+      LISTEN: "0.0.0.0:8080"
       ALLOW_PUBLIC_LISTEN: "true"
       HOT_SIZE: "${HOT_SIZE:-3000}"
       MAX_CONCURRENT: "${MAX_CONCURRENT:-120}"
@@ -22,7 +22,7 @@ services:
     volumes:
       - pool-data:/data
     healthcheck:
-      test: ["CMD", "curl", "-fsS", "http://127.0.0.1:18080/healthz"]
+      test: ["CMD", "curl", "-fsS", "http://127.0.0.1:8080/healthz"]
       interval: 15s
       timeout: 3s
       retries: 5
