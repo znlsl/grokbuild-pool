@@ -23,7 +23,8 @@ COPY --from=builder /out/pool-proxy /usr/local/bin/pool-proxy
 COPY --from=builder /out/poolctl /usr/local/bin/poolctl
 COPY config.example.yaml /etc/pool-proxy/config.example.yaml
 COPY deploy/docker-entrypoint.sh /usr/local/bin/docker-entrypoint.sh
-RUN chmod +x /usr/local/bin/docker-entrypoint.sh
+COPY deploy/render_config.py /usr/local/bin/render_config.py
+RUN chmod +x /usr/local/bin/docker-entrypoint.sh /usr/local/bin/render_config.py
 
 ENV POOL_DATA_DIR=/data \
     POOL_CONFIG=/data/config.yaml

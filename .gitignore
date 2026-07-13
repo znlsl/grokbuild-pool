@@ -29,3 +29,4 @@ mem.out
 
 # local agent state
 .claude/
+__pycache__/
