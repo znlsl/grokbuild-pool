@@ -10,8 +10,8 @@ import (
 	"github.com/yshgsh1343/grokbuild2api/internal/hot"
 )
 
-// 批量启停单次最多处理的 id 数（防误操作与超时）。
-const maxBatchAccountIDs = 500
+// 批量 SQL 单事务分块大小（取消对外 500 硬限；超长 ids 服务端自动分块处理）。
+const accountBatchChunk = 500
 
 // AccountHot 账号启用/禁用时同步热池的接口（*hot.Index 满足）。
 type AccountHot interface {
@@ -22,7 +22,7 @@ type AccountHot interface {
 }
 
 // ListAccounts GET /admin/accounts?cursor=&limit=
-// 游标分页返回脱敏账号摘要（无 token 明文）。
+// 游标分页返回脱敏账号摘要（无 token 明文）；附 total/stats 便于页码展示。
 func (h *Handlers) ListAccounts(w http.ResponseWriter, r *http.Request) {
 	if h.Catalog == nil {
 		writeErr(w, http.StatusServiceUnavailable, "账号目录未启用")
@@ -60,9 +60,24 @@ func (h *Handlers) ListAccounts(w http.ResponseWriter, r *http.Request) {
 	if rows == nil {
 		rows = []catalog.AccountSummary{}
 	}
+	total := 0
+	if n, err := h.Catalog.CountAccounts(); err == nil {
+		total = n
+	}
+	stats, _ := h.Catalog.Stats()
 	writeJSON(w, http.StatusOK, map[string]any{
 		"accounts":    rows,
 		"next_cursor": nextCursor,
+		"limit":       limit,
+		"total":       total,
+		"stats": map[string]any{
+			"count":            stats.Count,
+			"enabled":          stats.EnabledCount,
+			"active":           stats.ActiveCount,
+			"cooldown":         stats.CooldownCount,
+			"quarantine":       stats.QuarantineCount,
+			"disabled":         stats.DisabledCount,
+		},
 	})
 }
 
@@ -79,18 +94,19 @@ func (h *Handlers) EnableAccount(w http.ResponseWriter, r *http.Request) {
 }
 
 // BatchAccounts POST /admin/accounts/batch
-// body: {"action":"enable"|"disable"|"delete","ids":["..."]}，ids 上限 500；admin 鉴权由 Mount 保证。
-// enable/disable/delete 均走单事务批量 SQL，避免逐条读改写导致管理台卡顿。
+// body: {"action":"enable"|"disable"|"delete","ids":["..."]}
+// 无对外条数硬限：服务端按 accountBatchChunk 自动分块执行，admin 鉴权由 Mount 保证。
 func (h *Handlers) BatchAccounts(w http.ResponseWriter, r *http.Request) {
 	if h.Catalog == nil {
 		writeErr(w, http.StatusServiceUnavailable, "账号目录未启用")
 		return
 	}
+	// 大批量 ids 允许更大 body（默认 1MiB 对超长 id 列表偏紧）
 	var body struct {
 		Action string   `json:"action"`
 		IDs    []string `json:"ids"`
 	}
-	if err := decodeJSON(r, 1<<20, &body); err != nil {
+	if err := decodeJSON(r, 16<<20, &body); err != nil {
 		writeErr(w, http.StatusBadRequest, err.Error())
 		return
 	}
@@ -119,49 +135,54 @@ func (h *Handlers) BatchAccounts(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusBadRequest, "ids 不能为空")
 		return
 	}
-	if len(ids) > maxBatchAccountIDs {
-		writeErr(w, http.StatusBadRequest, "ids 最多 "+strconv.Itoa(maxBatchAccountIDs)+" 个")
-		return
-	}
 
-	var (
-		okIDs []string
-		err   error
-	)
-	switch action {
-	case "delete":
-		okIDs, err = h.Catalog.BatchDelete(ids)
-		if err != nil {
-			writeErr(w, http.StatusInternalServerError, err.Error())
-			return
+	okIDs := make([]string, 0, len(ids))
+	for start := 0; start < len(ids); start += accountBatchChunk {
+		end := start + accountBatchChunk
+		if end > len(ids) {
+			end = len(ids)
 		}
-		if h.AccountHot != nil && len(okIDs) > 0 {
-			h.AccountHot.DemoteMany(okIDs)
-		}
-	case "enable":
-		okIDs, err = h.Catalog.BatchSetManualEnabled(ids, true)
-		if err != nil {
-			writeErr(w, http.StatusInternalServerError, err.Error())
-			return
-		}
-		// 启用时若已在热池则刷新 Enabled；不在热池的等下次 LoadEligible/Promote
-		if h.AccountHot != nil {
-			for _, id := range okIDs {
-				if meta, ok := h.AccountHot.Get(id); ok {
-					meta.Enabled = true
-					_, _ = h.AccountHot.Promote(meta)
+		chunk := ids[start:end]
+		var (
+			part []string
+			err  error
+		)
+		switch action {
+		case "delete":
+			part, err = h.Catalog.BatchDelete(chunk)
+			if err != nil {
+				writeErr(w, http.StatusInternalServerError, err.Error())
+				return
+			}
+			if h.AccountHot != nil && len(part) > 0 {
+				h.AccountHot.DemoteMany(part)
+			}
+		case "enable":
+			part, err = h.Catalog.BatchSetManualEnabled(chunk, true)
+			if err != nil {
+				writeErr(w, http.StatusInternalServerError, err.Error())
+				return
+			}
+			// 启用时若已在热池则刷新 Enabled；不在热池的等下次 LoadEligible/Promote
+			if h.AccountHot != nil {
+				for _, id := range part {
+					if meta, ok := h.AccountHot.Get(id); ok {
+						meta.Enabled = true
+						_, _ = h.AccountHot.Promote(meta)
+					}
 				}
 			}
+		case "disable":
+			part, err = h.Catalog.BatchSetManualEnabled(chunk, false)
+			if err != nil {
+				writeErr(w, http.StatusInternalServerError, err.Error())
+				return
+			}
+			if h.AccountHot != nil && len(part) > 0 {
+				h.AccountHot.DemoteMany(part)
+			}
 		}
-	case "disable":
-		okIDs, err = h.Catalog.BatchSetManualEnabled(ids, false)
-		if err != nil {
-			writeErr(w, http.StatusInternalServerError, err.Error())
-			return
-		}
-		if h.AccountHot != nil && len(okIDs) > 0 {
-			h.AccountHot.DemoteMany(okIDs)
-		}
+		okIDs = append(okIDs, part...)
 	}
 
 	// 汇总未命中 id
@@ -181,7 +202,7 @@ func (h *Handlers) BatchAccounts(w http.ResponseWriter, r *http.Request) {
 		"failed": len(failed),
 		"ids_ok": okIDs,
 		"errors": failed,
-		"limit":  maxBatchAccountIDs,
+		"chunk":  accountBatchChunk,
 	})
 }
 

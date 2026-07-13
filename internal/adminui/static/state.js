@@ -11,6 +11,8 @@ export const state = {
   accNextCursor: "",
   accCursorStack: [],
   accPageIndex: 1,
+  accTotal: 0,
+  accStats: null,
   accLoading: false,
   // route leave animation generation token
   routeGen: 0,

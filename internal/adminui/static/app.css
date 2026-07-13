@@ -901,6 +901,44 @@ tbody tr:last-child td {
   border-color: var(--color-border-default);
   background: var(--color-bg-subtle);
 }
+.badge-warn {
+  color: #b45309;
+  border-color: color-mix(in srgb, #b45309 45%, var(--color-border-default));
+  background: color-mix(in srgb, #f59e0b 12%, transparent);
+}
+.badge-cool {
+  color: #0369a1;
+  border-color: color-mix(in srgb, #0284c7 40%, var(--color-border-default));
+  background: color-mix(in srgb, #0ea5e9 12%, transparent);
+}
+.badge-soft {
+  color: var(--color-text-secondary);
+  border-color: var(--color-border-default);
+  background: color-mix(in srgb, var(--color-bg-subtle) 80%, transparent);
+}
+.badge-life {
+  color: var(--color-text-primary);
+  border-color: color-mix(in srgb, var(--color-text-primary) 20%, var(--color-border-default));
+  background: color-mix(in srgb, var(--color-text-primary) 6%, transparent);
+}
+.acc-status-cell {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+  max-width: 280px;
+}
+.acc-stats {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px 16px;
+  margin: 0 0 12px;
+  font-size: 12px;
+}
+.acc-stats .acc-stat strong {
+  font-variant-numeric: tabular-nums;
+  color: var(--color-text-primary);
+  font-weight: 600;
+}
 .empty,
 .err-box {
   padding: 20px 14px;

@@ -1,4 +1,4 @@
-/* Accounts page — cursor pagination + batch ops */
+/* Accounts page — cursor pagination + batch ops + status */
 import { state } from "./state.js";
 import { $, esc, toast, fmtCooldown, skeletonRows } from "./util.js";
 import { api, handleAuthError, adminAuthHeaders } from "./api.js";
@@ -11,11 +11,30 @@ function updateAccPagerUI(pageCount) {
   if (prev) prev.disabled = state.accLoading || state.accCursorStack.length === 0;
   if (next) next.disabled = state.accLoading || !state.accNextCursor;
   if (info) {
-    var bits = ["第 " + state.accPageIndex + " 页"];
+    var pageSize = state.accPageSize > 0 ? state.accPageSize : 50;
+    var total = state.accTotal > 0 ? state.accTotal : 0;
+    var totalPages = total > 0 ? Math.max(1, Math.ceil(total / pageSize)) : 0;
+    var bits = [];
+    if (totalPages > 0) {
+      bits.push("第 " + state.accPageIndex + " / " + totalPages + " 页");
+    } else {
+      bits.push("第 " + state.accPageIndex + " 页");
+    }
+    if (total > 0) bits.push("共 " + total + " 账号");
     if (pageCount != null) bits.push("本页 " + pageCount + " 条");
     if (state.accNextCursor) bits.push("有后续");
-    else if (pageCount > 0) bits.push("已到末页");
+    else if (pageCount > 0 && totalPages > 0) bits.push("已到末页");
     info.textContent = bits.join(" · ");
+  }
+  var statsEl = $("accStats");
+  if (statsEl && state.accStats) {
+    var s = state.accStats;
+    statsEl.innerHTML =
+      '<span class="acc-stat">启用 <strong>' + esc(String(s.enabled != null ? s.enabled : "—")) + "</strong></span>" +
+      '<span class="acc-stat">活跃 <strong>' + esc(String(s.active != null ? s.active : "—")) + "</strong></span>" +
+      '<span class="acc-stat">冷却 <strong>' + esc(String(s.cooldown != null ? s.cooldown : "—")) + "</strong></span>" +
+      '<span class="acc-stat">隔离 <strong>' + esc(String(s.quarantine != null ? s.quarantine : "—")) + "</strong></span>" +
+      '<span class="acc-stat">禁用 <strong>' + esc(String(s.disabled != null ? s.disabled : "—")) + "</strong></span>";
   }
 }
 
@@ -45,16 +64,43 @@ function updateAccSelUI() {
   if (bdel) bdel.disabled = n === 0;
 }
 
+function accountStatusBadges(a) {
+  var now = Math.floor(Date.now() / 1000);
+  var parts = [];
+  var life = String(a.lifecycle || "").toLowerCase();
+  if (life === "quarantined") {
+    parts.push('<span class="badge badge-warn">隔离</span>');
+  } else if (life === "purged") {
+    parts.push('<span class="badge off">已清理</span>');
+  } else if (life && life !== "active") {
+    parts.push('<span class="badge off">' + esc(life) + "</span>");
+  } else {
+    parts.push('<span class="badge badge-life">活跃</span>');
+  }
+  if (a.enabled) parts.push('<span class="badge on">启用</span>');
+  else parts.push('<span class="badge off">禁用</span>');
+  if (a.manual_disabled) parts.push('<span class="badge off">手动关</span>');
+  if (a.cooldown_until && Number(a.cooldown_until) > now) {
+    parts.push('<span class="badge badge-cool">冷却 ' + esc(fmtCooldown(a.cooldown_until)) + "</span>");
+  }
+  if (a.failure_count && Number(a.failure_count) > 0) {
+    parts.push('<span class="badge badge-soft">失败 ' + esc(String(a.failure_count)) + "</span>");
+  }
+  if (!a.has_access && !a.has_refresh) {
+    parts.push('<span class="badge off">无令牌</span>');
+  } else if (!a.has_access) {
+    parts.push('<span class="badge badge-soft">无 access</span>');
+  }
+  return '<div class="acc-status-cell">' + parts.join(" ") + "</div>";
+}
+
 function runBatchAccounts(action) {
   var ids = selectedAccountIds();
   if (!ids.length) {
     toast("请先勾选账号", false);
     return;
   }
-  if (ids.length > 500) {
-    toast("单次最多 500 个", false);
-    return;
-  }
+  // 无前端条数硬限；后端自动按 chunk 分块
   var btns = ["accBatchEnable", "accBatchDisable", "accBatchDelete", "accSelectAll", "accSelectNone"];
   btns.forEach(function (id) {
     var el = $(id);
@@ -96,6 +142,8 @@ function loadAccounts() {
     state.accLoading = false;
     var list = (res && res.accounts) || [];
     state.accNextCursor = (res && res.next_cursor) ? String(res.next_cursor) : "";
+    if (res && res.total != null) state.accTotal = Number(res.total) || 0;
+    if (res && res.stats) state.accStats = res.stats;
     if (!list.length) {
       if (state.accPageIndex > 1) {
         if (state.accCursorStack.length) {
@@ -107,24 +155,21 @@ function loadAccounts() {
       }
       host.innerHTML =
         '<div class="empty"><strong>暂无账号</strong>' +
-        "请用 poolctl import / bulkimport 或管理台导入后再刷新。</div>";
+        "请用 poolctl import / bulkimport、scripts/sso_convert.py 或管理台导入后再刷新。</div>";
       updateAccSelUI();
       updateAccPagerUI(0);
       return;
     }
     var rows = list.map(function (a) {
-      var status = a.enabled
-        ? '<span class="badge on">启用</span>'
-        : '<span class="badge off">禁用</span>';
       var proxy = a.proxy_url ? String(a.proxy_url) : "直连";
+      var life = a.lifecycle || "—";
       return "<tr>" +
         '<td><input type="checkbox" class="acc-check" data-id="' +
           esc(a.id) + '" /></td>' +
         '<td class="mono">' + esc(a.id) + "</td>" +
         "<td>" + esc(a.email || "—") + "</td>" +
-        "<td>" + esc(a.lifecycle || "—") + "</td>" +
-        "<td>" + status + "</td>" +
-        "<td>" + esc(fmtCooldown(a.cooldown_until)) + "</td>" +
+        "<td>" + accountStatusBadges(a) + "</td>" +
+        '<td class="mono muted">' + esc(life) + "</td>" +
         "<td>" + esc(String(a.priority != null ? a.priority : 0)) + "</td>" +
         '<td class="mono" title="' + esc(proxy) + '">' + esc(proxy) + "</td>" +
         '<td class="actions">' +
@@ -138,8 +183,8 @@ function loadAccounts() {
     host.innerHTML =
       '<div class="table-wrap"><table><thead><tr>' +
       '<th><input type="checkbox" id="accCheckAll" title="全选本页" /></th>' +
-      "<th>ID</th><th>Email</th><th>生命周期</th><th>状态</th>" +
-      "<th>冷却</th><th>优先级</th><th>代理</th><th></th>" +
+      "<th>ID</th><th>Email</th><th>状态</th><th>生命周期</th>" +
+      "<th>优先级</th><th>代理</th><th></th>" +
       "</tr></thead><tbody>" + rows + "</tbody></table></div>";
 
     var master = $("accCheckAll");
@@ -200,11 +245,14 @@ export function renderAccounts() {
   state.accNextCursor = "";
   state.accCursorStack = [];
   state.accPageIndex = 1;
+  state.accTotal = 0;
+  state.accStats = null;
   $("main").innerHTML = wrapPage(
-    pageHd("账户管理", "冷存储脱敏列表 · 启停同步热池 · 批量最多 500 · 后端导出自动分片合并",
+    pageHd("账户管理", "冷存储脱敏列表 · 启停同步热池 · 批量无条数硬限（服务端自动分块）· 导出自动分片",
       '<button type="button" class="page-action-btn" id="accExport">导出 JSON</button>' +
       '<button type="button" class="page-action-btn" id="accRefresh">刷新</button>') +
     '<div class="panel">' +
+    '<div id="accStats" class="acc-stats muted"></div>' +
     '<div class="toolbar acc-batch-bar">' +
     '<button type="button" class="btn btn-sm btn-secondary" id="accSelectAll" disabled>全选本页</button>' +
     '<button type="button" class="btn btn-sm btn-secondary" id="accSelectNone" disabled>清空</button>' +
