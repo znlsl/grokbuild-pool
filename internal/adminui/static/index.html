@@ -1,0 +1,73 @@
+<!DOCTYPE html>
+<html lang="zh-CN" data-theme="light">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <meta name="color-scheme" content="light dark" />
+  <title>grokbuild-pool · 管理后台</title>
+  <script src="/admin/ui/theme-boot.js"></script>
+  <link rel="stylesheet" href="/admin/ui/app.css" />
+</head>
+<body>
+  <a class="skip-link" href="#main">跳到主要内容</a>
+
+  <header class="admin-header">
+    <div class="admin-header-inner">
+      <div class="admin-brand-wrap">
+        <button type="button" id="menuBtn" class="btn btn--icon btn--ghost mobile-only hidden" aria-label="打开菜单" aria-expanded="false" aria-controls="mobileDrawer">
+          <svg viewBox="0 0 24 24" width="18" height="18" aria-hidden="true"><path d="M4 7h16M4 12h16M4 17h16" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/></svg>
+        </button>
+        <span class="admin-brand">grokbuild-pool</span>
+        <span class="admin-brand-sub desktop-only">Scheme B</span>
+      </div>
+
+      <nav id="nav" class="admin-nav is-locked" aria-label="主导航">
+        <a href="#/dashboard" class="admin-nav-link" data-route="dashboard">仪表盘</a>
+        <a href="#/accounts" class="admin-nav-link" data-route="accounts">账号</a>
+        <a href="#/tokens" class="admin-nav-link" data-route="tokens">Token</a>
+        <a href="#/imports" class="admin-nav-link" data-route="imports">导入任务</a>
+        <a href="#/settings" class="admin-nav-link" data-route="settings">设置</a>
+        <a href="#/config" class="admin-nav-link" data-route="config">配置</a>
+      </nav>
+
+      <div class="admin-header-right">
+        <span class="admin-header-version" id="hdVersion">v0.1</span>
+        <button type="button" id="themeToggle" class="btn btn--ghost btn--sm" title="切换深浅色">深色</button>
+        <button type="button" id="logoutBtn" class="btn btn--icon btn--ghost hidden" title="退出" aria-label="退出">
+          <svg viewBox="0 0 24 24" aria-hidden="true" width="14" height="14">
+            <path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/>
+            <path d="M16 17l5-5-5-5" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/>
+            <path d="M21 12H9" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/>
+          </svg>
+        </button>
+      </div>
+    </div>
+  </header>
+
+  <!-- 移动端抽屉 -->
+  <div id="mobileOverlay" class="mobile-overlay hidden" hidden></div>
+  <aside id="mobileDrawer" class="mobile-drawer" role="dialog" aria-modal="true" aria-hidden="true" aria-label="移动导航" inert>
+    <div class="mobile-drawer-head">
+      <strong>菜单</strong>
+      <button type="button" id="menuClose" class="btn btn--icon btn--ghost" aria-label="关闭菜单">×</button>
+    </div>
+    <nav class="mobile-nav" id="mobileNav">
+      <a href="#/dashboard" data-route="dashboard">仪表盘</a>
+      <a href="#/accounts" data-route="accounts">账号</a>
+      <a href="#/tokens" data-route="tokens">Token</a>
+      <a href="#/imports" data-route="imports">导入任务</a>
+      <a href="#/settings" data-route="settings">设置</a>
+      <a href="#/config" data-route="config">配置</a>
+    </nav>
+  </aside>
+
+  <div class="admin-main">
+    <main id="main" tabindex="-1"></main>
+  </div>
+
+  <div class="toast-container" id="toastHost" aria-live="polite"></div>
+  <div class="site-footer">pool · :18080</div>
+
+  <script src="/admin/ui/app.js"></script>
+</body>
+</html>

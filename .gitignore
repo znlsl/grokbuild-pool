@@ -1,0 +1,31 @@
+# build
+/bin/
+/dist/
+*.exe
+*.test
+*.out
+
+# data & local state (never commit tokens)
+/data/
+*.db
+*.db-wal
+*.db-shm
+*.ndjson
+
+# profiles / benches
+*.pprof
+*.prof
+cpu.out
+mem.out
+
+# IDE / OS
+.idea/
+.vscode/
+.DS_Store
+
+# local env
+.env
+*.local.yaml
+
+# local agent state
+.claude/

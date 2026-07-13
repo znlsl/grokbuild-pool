@@ -1,0 +1,112 @@
+# pool-proxy 示例配置
+# Docker 部署时 data_dir 建议使用 /data
+
+listen: "0.0.0.0:18080"
+allow_public_listen: true
+
+# 数据目录：账号库、tokens.db、settings.json、导入暂存
+data_dir: "./data"
+
+# 可选：显式指定账号库路径。为空时按以下顺序尝试：
+#   1) {data_dir}/pool-10000.db
+#   2) {data_dir}/pool.db
+db_path: ""
+
+# 静态客户端 API Key（可选）。为空时：
+# - 若 tokens.db 有发放令牌，则按令牌鉴权
+# - 否则本地 mock 可放行
+api_key: ""
+
+# 管理台密钥。公网监听时必须设置强随机值，禁止使用占位符
+admin_key: "change-me"
+
+# 热池目标容量
+hot_size: 3000
+
+# true 或 upstream.base_url 为空 → 使用内置 mock 上游（不访问真实 Grok）
+mock_upstream: true
+
+upstream:
+  # 真实上游示例：
+  # base_url: "https://cli-chat-proxy.grok.com/v1"
+  base_url: ""
+  client_version: "0.2.93"
+  client_identifier: "grok-pager"
+  user_agent: "grok-pager/0.2.93 grok-shell/0.2.93 (linux; x86_64)"
+  token_auth: "xai-grok-cli"
+
+# OAuth 刷新脚手架。真实请求需同时满足：
+#   1) 环境变量 POOL_OAUTH_ENABLED=1
+#   2) status_path 指向的 STATUS 中 UNLOCK_M12=true
+# mock_upstream=true 时始终用 MockOAuth
+oauth:
+  refresh_url: ""
+  client_id: ""
+  status_path: ""
+
+selector:
+  strategy: pow2_least_load
+  hot_size: 3000
+  sticky_ttl_sec: 1800
+  sticky_max: 100000
+  pow2_k: 2
+  max_attempts: 6
+  max_inflight_per_account: 4
+
+lease:
+  max_attempts: 6
+  cooldown_base_sec: 60
+  cooldown_cap_sec: 900
+  unauthorized_cooldown_sec: 120
+  payment_required_cooldown_sec: 300
+  unauthorized_quarantine_after: 3
+  forbidden_cooldown_sec: 900
+  forbidden_quarantine_after: 0
+  cooldown_jitter_pct: 20
+
+anthropic:
+  enabled: true
+  model_aliases:
+    claude-sonnet-4: grok-4.5
+    claude-sonnet-4-0: grok-4.5
+    claude-sonnet-4-6: grok-4.5
+    claude-sonnet-5: grok-4.5
+    claude-opus-4: grok-4.5
+    claude-opus-4-6: grok-4.5
+    claude-opus-4-7: grok-4.5
+    claude-opus-4-8: grok-4.5
+    claude-haiku-4: grok-composer-2.5-fast
+    claude-haiku-4-5: grok-composer-2.5-fast
+    sonnet: grok-4.5
+    opus: grok-4.5
+    haiku: grok-composer-2.5-fast
+  passthrough_prefixes: ["grok-"]
+  strip_unknown_betas: true
+  count_tokens: false
+
+imports:
+  enabled: true
+  max_upload_bytes: 33554432
+  max_request_bytes: 34603008
+  max_entries: 10000
+  max_ndjson_line_bytes: 1048576
+  max_sso_value_bytes: 16384
+  max_concurrent_jobs: 2
+  job_timeout_sec: 7200
+  staging_stale_after_sec: 86400
+  allow_server_path: false
+  sso_converter:
+    endpoint: ""
+    api_key: ""
+    max_batch: 50
+    timeout_sec: 300
+    allow_insecure: false
+
+limits:
+  max_body_bytes: 20971520
+  request_timeout_sec: 600
+  # 全局并发硬上限；超出返回 503 + Retry-After: 1
+  max_concurrent: 120
+
+logging:
+  level: info

@@ -1,0 +1,142 @@
+# grokbuild2api
+
+将 **Grok Build** 能力以 **OpenAI / Anthropic 兼容 API** 暴露给客户端（Claude Code、OpenAI SDK 等），并内置大规模账号池调度。
+
+## 功能
+
+- **协议兼容**：OpenAI Responses / Chat Completions，Anthropic Messages
+- **账号池**：SQLite 冷库 + 内存热索引；租约选号（粘性 + Power-of-Two）
+- **管理台**：浏览器 UI（`/admin/`），令牌发放、账号导入、运行参数热更新
+- **额度与限流**：令牌额度预扣/结算、每令牌并发与 RPM、全局并发上限
+- **Docker 一键部署**
+
+默认端口：**18080**
+
+## 快速开始（Docker）
+
+### 1. 准备
+
+```bash
+git clone https://github.com/yshgsh1343/grokbuild2api.git
+cd grokbuild2api
+```
+
+### 2. 设置管理密钥后启动
+
+```bash
+export ADMIN_KEY="$(openssl rand -hex 24)"
+export MOCK_UPSTREAM=true   # 先用内置 mock 冒烟；接真实上游时改为 false
+
+docker compose up -d --build
+```
+
+### 3. 检查
+
+```bash
+curl -fsS http://127.0.0.1:18080/healthz
+# 期望输出：ok
+
+# 管理台
+# 浏览器打开 http://127.0.0.1:18080/admin/
+# 请求头或登录使用 ADMIN_KEY
+```
+
+数据持久化在 Docker volume `pool-data`（容器内 `/data`）：账号库、`tokens.db`、`settings.json`、运行配置。
+
+### 常用环境变量
+
+| 变量 | 说明 | 默认 |
+|------|------|------|
+| `ADMIN_KEY` | 管理台密钥（**必改**） | 示例占位，生产务必替换 |
+| `API_KEY` | 静态客户端 Key；空则依赖管理台发放的 `sk-` 令牌 | 空 |
+| `MOCK_UPSTREAM` | `true` 使用内置 mock 上游 | `true` |
+| `UPSTREAM_BASE_URL` | 真实上游 Base URL | 空 |
+| `LISTEN` | 监听地址 | `0.0.0.0:18080` |
+| `HOT_SIZE` | 热池容量 | `3000` |
+| `MAX_CONCURRENT` | 全局并发硬上限 | `120` |
+| `LOG_LEVEL` | 日志级别 | `info` |
+
+示例：
+
+```bash
+export ADMIN_KEY=你的强随机密钥
+export MOCK_UPSTREAM=false
+export UPSTREAM_BASE_URL="https://你的上游/v1"
+docker compose up -d --build
+```
+
+### 停止 / 查看日志
+
+```bash
+docker compose logs -f pool-proxy
+docker compose down
+```
+
+## 客户端调用示例
+
+管理台创建令牌后，使用返回的 `sk-...`：
+
+```bash
+# OpenAI 兼容
+curl -sS http://127.0.0.1:18080/v1/chat/completions \
+  -H "Authorization: Bearer sk-你的令牌" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "model": "grok-4.5",
+    "messages": [{"role":"user","content":"你好"}]
+  }'
+```
+
+Anthropic 兼容（Claude Code 等）走 `/v1/messages`，同样带 API Key。
+
+## 本地编译（可选）
+
+需要 Go 1.26+：
+
+```bash
+make test
+make build
+./bin/pool-proxy --config config.example.yaml
+```
+
+导入账号可用：
+
+```bash
+./bin/poolctl import-json --db ./data/pool.db --in ./auth.json --workers 4
+./bin/poolctl import-sso  --db ./data/pool.db --in ./sso.txt \
+  --converter-url http://127.0.0.1:8091 --api-key "$KEY"
+```
+
+## 配置说明
+
+完整示例见 [`config.example.yaml`](config.example.yaml)。
+
+要点：
+
+1. **公网监听**必须设置非占位 `admin_key`
+2. **未知 YAML 字段**会被拒绝，避免拼写错误静默失效
+3. 运行中可通过管理台热更新：全局并发、请求体上限、超时、选号权重、刷新 QPS 等
+4. 令牌额度在请求前**原子预扣**，结束后按实际 usage 结算；失败会退回
+
+## 目录结构
+
+```text
+cmd/pool-proxy     HTTP 服务入口
+cmd/poolctl        导入 / 统计 / 压测工具
+internal/          核心实现（catalog / hot / selector / lease / refresh / protocol / admin）
+deploy/            Docker 入口脚本
+Dockerfile
+docker-compose.yml
+config.example.yaml
+```
+
+## 安全建议
+
+- 务必更换 `ADMIN_KEY`，不要使用示例占位值
+- 生产环境用反向代理终止 TLS，并限制管理台来源 IP
+- 不要把 `data/`、`tokens.db`、含密钥的配置提交到 Git
+- `mock_upstream: true` 仅用于联调；接真实上游前确认 OAuth / 账号数据已就绪
+
+## 许可证
+
+未单独声明许可证时，默认仅供个人学习与自用部署。商用请自行评估上游服务条款与账号合规风险。
