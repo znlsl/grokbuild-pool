@@ -61,10 +61,6 @@ type Config struct {
 	// HotSize 为热索引容量（默认 3000）。
 	HotSize int `yaml:"hot_size"`
 
-	// MockUpstream 已废弃：进程始终反代真实 upstream.base_url。
-	// 字段仍解析 YAML 以兼容旧配置，但启动时会被忽略。
-	MockUpstream bool `yaml:"mock_upstream"`
-
 	Upstream UpstreamConfig `yaml:"upstream"`
 	// OAuth 控制真实 refresh 脚手架（HTTPRefreshClient / XaiOAuth）。
 	// 默认不向公网发请求：须 POOL_OAUTH_ENABLED=1 且 STATUS UNLOCK_M12=true。
@@ -179,9 +175,8 @@ func Default() Config {
 		APIKey:            "",
 		AdminKey:          "",
 		HotSize:           DefaultHotSize,
-		MockUpstream:      false,
 		Upstream: UpstreamConfig{
-			// 空 base_url → mock 模式，无真实 Grok 时安全冒烟。
+				// 必须显式配置真实上游；空值在 Validate 中拒绝。
 			BaseURL:          "",
 			ClientVersion:    "0.2.93",
 			ClientIdentifier: "grok-pager",
@@ -543,11 +538,6 @@ func (c Config) RequestTimeout() time.Duration {
 	return time.Duration(sec) * time.Second
 }
 
-// UseMockUpstream 始终 false：内置 mock 上游已移除，仅反代真实 upstream.base_url。
-// 保留方法以兼容旧调用点（admin 快照等）。
-func (c Config) UseMockUpstream() bool {
-	return false
-}
 
 // ResolveDBPath 选择 catalog SQLite 文件。
 //

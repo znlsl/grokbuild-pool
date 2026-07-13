@@ -2,7 +2,6 @@
 //（singleflight + 全局 QPS 限流）。
 //
 // 模块 M08（Scheme B）。网络调用经 OAuthClient：
-//   - mock：mockup.MockOAuth + MockOAuthAdapter
 //   - 桩：DisabledOAuth（默认安全路径）
 //   - 真实脚手架：HTTPRefreshClient / XaiOAuth（可配置 token URL）
 //

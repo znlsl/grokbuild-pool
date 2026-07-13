@@ -95,9 +95,6 @@ func applyEnv(text string, environ []string) (string, string, error) {
 		text = setScalar(text, "admin_key", admin)
 	}
 	set("hot_size", env["HOT_SIZE"])
-	// mock_upstream 已废弃；强制 false，仅反代真实 upstream
-	set("mock_upstream", "false")
-
 	if v := env["UPSTREAM_BASE_URL"]; v != "" {
 		text = setNested(text, "upstream", "base_url", v)
 	}

@@ -10,7 +10,7 @@ import (
 // OAuthClient 向身份提供方执行令牌刷新。
 // 真实 HTTP 实现见 HTTPRefreshClient / XaiOAuth；默认进程用 DisabledOAuth 或 mock。
 // 生产启用须同时满足：环境变量 POOL_OAUTH_ENABLED=1 且 STATUS UNLOCK_M12=true。
-// 测试通过适配器使用 mockup.MockOAuth，或用 httptest 测 HTTPRefreshClient。
+// 测试用 httptest 测 HTTPRefreshClient。
 type OAuthClient interface {
 	Refresh(ctx context.Context, refreshToken string) (catalog.TokenSet, error)
 }

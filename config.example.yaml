@@ -23,9 +23,6 @@ admin_key: "local-dev-admin-key-not-for-prod"
 # 热池目标容量
 hot_size: 3000
 
-# mock_upstream 已废弃（保留字段兼容旧配置，启动时忽略）
-mock_upstream: false
-
 upstream:
   # 必填：直接反代的真实上游 base_url（含 /v1）
   base_url: "https://cli-chat-proxy.grok.com/v1"

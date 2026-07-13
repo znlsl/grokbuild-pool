@@ -91,7 +91,6 @@ type RuntimeSettings struct {
 	AllowPublicListen  bool   `json:"allow_public_listen"`
 	DataDir            string `json:"data_dir"`
 	DBPath             string `json:"db_path"`
-	MockUpstream       bool   `json:"mock_upstream"`
 	UpstreamBaseURL    string `json:"upstream_base_url"`
 	OAuthRefreshURL    string `json:"oauth_refresh_url"`
 	OAuthClientID      string `json:"oauth_client_id"`
@@ -471,7 +470,7 @@ func (c *SettingsController) Apply(in RuntimeSettings) (RuntimeSettings, error) 
 		in.ImportSSOWorkers = 16
 	}
 
-	// 重启提示：端口/数据路径/mock 切换
+	// 重启提示：端口/数据路径/upstream 切换
 	var restart []string
 	if pi.Listen != "" && in.Listen != "" && in.Listen != pi.Listen {
 		restart = append(restart, "listen")
@@ -481,9 +480,6 @@ func (c *SettingsController) Apply(in RuntimeSettings) (RuntimeSettings, error) 
 	}
 	if pi.DBPath != "" && in.DBPath != "" && in.DBPath != pi.DBPath {
 		restart = append(restart, "db_path")
-	}
-	if in.MockUpstream != pi.MockUpstream {
-		restart = append(restart, "mock_upstream")
 	}
 	if in.UpstreamBaseURL != pi.UpstreamBaseURL {
 		restart = append(restart, "upstream_base_url")
