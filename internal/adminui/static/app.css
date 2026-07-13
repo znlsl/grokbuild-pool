@@ -918,6 +918,17 @@ tbody tr:last-child td {
   text-align: left;
   margin-bottom: 12px;
 }
+.ok-box {
+  padding: 12px 14px;
+  border-radius: 12px;
+  border: 1px solid color-mix(in srgb, var(--color-success) 35%, var(--color-border-default));
+  color: color-mix(in srgb, var(--color-success) 85%, var(--color-text-primary));
+  background: color-mix(in srgb, var(--color-success) 10%, var(--color-bg-surface));
+  text-align: left;
+  margin-bottom: 12px;
+  font-size: 13px;
+  font-weight: 500;
+}
 .once-key {
   background: var(--color-bg-page);
   border: 1px dashed #d4a017;
@@ -1118,9 +1129,16 @@ body.nav-open {
   }
   .page-enter,
   .toast,
-  .toast.is-leaving {
+  .toast.is-leaving,
+  .set-meta-flash,
+  .set-json-flash {
     opacity: 1 !important;
     transform: none !important;
+    animation: none !important;
+  }
+  .page-action-btn-primary.is-busy::after,
+  .page-action-btn.is-busy::after {
+    animation: none !important;
   }
   .panel:hover,
   .stat-card:hover,
@@ -1413,9 +1431,55 @@ tr.tok-detail-row.hidden {
   max-height: 360px;
   overflow: auto;
   margin: 0;
+  border-radius: 8px;
+  transition: box-shadow 0.35s ease, background-color 0.35s ease;
 }
 .set-json-pre.is-collapsed {
   display: none;
+}
+#setHint {
+  transition: box-shadow 0.35s ease, background-color 0.35s ease;
+  border-radius: 12px;
+}
+.set-meta-flash,
+.set-json-flash {
+  animation: setFlash 0.65s cubic-bezier(0.16, 1, 0.3, 1) both;
+}
+@keyframes setFlash {
+  0% {
+    box-shadow: 0 0 0 0 color-mix(in srgb, var(--color-success) 0%, transparent);
+    background-color: color-mix(in srgb, var(--color-success) 16%, var(--color-bg-surface));
+  }
+  40% {
+    box-shadow: 0 0 0 4px color-mix(in srgb, var(--color-success) 18%, transparent);
+    background-color: color-mix(in srgb, var(--color-success) 10%, var(--color-bg-surface));
+  }
+  100% {
+    box-shadow: 0 0 0 0 transparent;
+    background-color: transparent;
+  }
+}
+.page-action-btn-primary.is-busy,
+.page-action-btn.is-busy {
+  opacity: 0.72;
+  cursor: wait;
+  position: relative;
+}
+.page-action-btn-primary.is-busy::after,
+.page-action-btn.is-busy::after {
+  content: "";
+  display: inline-block;
+  width: 10px;
+  height: 10px;
+  margin-left: 8px;
+  border: 1.5px solid currentColor;
+  border-right-color: transparent;
+  border-radius: 50%;
+  vertical-align: -1px;
+  animation: spinBusy 0.7s linear infinite;
+}
+@keyframes spinBusy {
+  to { transform: rotate(360deg); }
 }
 
 /* Motion: page enter / cards / press feedback */

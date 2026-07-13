@@ -623,22 +623,71 @@
       return String(text || "").split(/[,\n]/).map(function (s) { return s.trim(); }).filter(Boolean);
     }
 
+    function flashEl(el, cls) {
+      if (!el) return;
+      el.classList.remove(cls);
+      void el.offsetWidth;
+      el.classList.add(cls);
+      window.setTimeout(function () {
+        el.classList.remove(cls);
+      }, 700);
+    }
+
+    // 仅更新提示 + JSON 快照，不重建表单（避免保存后整页重载的错觉）
+    function applyMeta(s, opts) {
+      opts = opts || {};
+      s = s || {};
+      window.__settings = s;
+      var path = s.persisted_path || "（内存）";
+      var hint = $("setHint");
+      if (hint) {
+        if (s.restart_hint) {
+          hint.innerHTML = '<div class="err-box" style="border-color:var(--color-warning,#c90)">' +
+            esc(s.restart_hint) +
+            '<div class="muted" style="margin-top:6px">提示：管理台不会自动重启服务；请在维护窗口手动重启容器/进程。</div></div>';
+        } else if (opts.saved) {
+          hint.innerHTML = '<div class="ok-box set-save-ok">' +
+            esc(opts.persisted ? "已保存并热更新（无需重启）" : "已热更新（无需重启）") +
+            '<div class="muted" style="margin-top:6px">持久化：' + esc(path) +
+            " · 表单未重载 · 密钥留空=不改</div></div>";
+        } else {
+          hint.innerHTML = '<p class="muted">持久化：' + esc(path) +
+            " · 点「保存并应用」才会写入 · 无自动保存 · 密钥 / SSO key 留空=不改</p>";
+        }
+        if (opts.flash) flashEl(hint, "set-meta-flash");
+      }
+      var pre = $("setPreview");
+      if (pre) {
+        pre.textContent = JSON.stringify(s, null, 2);
+        if (opts.flash) flashEl(pre, "set-json-flash");
+      }
+      var err = $("setErr");
+      if (err) err.innerHTML = "";
+
+      // 保存后清空密钥输入，并按服务端「是否已配置」刷新 placeholder
+      if (opts.clearSecrets) {
+        var ssoKey = $("sSsoKey");
+        if (ssoKey) {
+          ssoKey.value = "";
+          ssoKey.placeholder = s.import_sso_api_key_set ? "已配置 · 留空保持" : "未配置";
+        }
+        var apiKey = $("sApiKey");
+        if (apiKey) {
+          apiKey.value = "";
+          apiKey.placeholder = s.api_key_configured ? "已配置" : "未配置";
+        }
+        var admKey = $("sAdmKey");
+        if (admKey) {
+          admKey.value = "";
+          admKey.placeholder = s.admin_key_configured ? "已配置" : "未配置";
+        }
+      }
+    }
+
     function load() {
       api("/admin/settings").then(function (s) {
         if (s && s.settings) s = Object.assign({}, s.settings, { persisted_path: s.persisted_path });
-        window.__settings = s || {};
-        var path = s.persisted_path || "（内存）";
-        var hint = $("setHint");
-        if (hint) {
-          if (s.restart_hint) {
-            hint.innerHTML = '<div class="err-box" style="border-color:var(--color-warning,#c90)">' +
-              esc(s.restart_hint) +
-              '<div class="muted" style="margin-top:6px">提示：管理台不会自动重启服务；请在维护窗口手动重启容器/进程。</div></div>';
-          } else {
-            hint.innerHTML = '<p class="muted">持久化：' + esc(path) +
-              " · 点「保存并应用」才会写入 · 无自动保存 · 密钥 / SSO key 留空=不改</p>";
-          }
-        }
+        s = s || {};
         var html = "";
         html += section("sel", "选号 / 热池", "策略/权重/粘性即时生效；热池大小变更仅落盘，需重启后扩容",
           fieldSelect("策略", "sStrat", s.selector_strategy || "pow2_least_load", [
@@ -727,9 +776,7 @@
           fieldText("Admin Key(留空不改)", "sAdmKey", "", s.admin_key_configured ? "已配置" : "未配置")
         );
         $("setForm").innerHTML = html;
-        $("setPreview").textContent = JSON.stringify(s, null, 2);
-        var err = $("setErr");
-        if (err) err.innerHTML = "";
+        applyMeta(s, { flash: false });
       }).catch(function (e) {
         if (handleAuthError(e)) return;
         var err = $("setErr");
@@ -828,24 +875,38 @@
       if (admKey) body.admin_key = admKey;
 
       var btn = $("saveSet");
-      if (btn) btn.disabled = true;
+      if (btn) {
+        btn.disabled = true;
+        btn.classList.add("is-busy");
+      }
       api("/admin/settings", { method: "PUT", body: body }).then(function (res) {
         var s = (res && res.settings) || body;
-        window.__settings = s;
+        // PUT 响应无 persisted_path；保留当前页已知路径，避免提示回退成「内存」
+        if (s && !s.persisted_path && window.__settings && window.__settings.persisted_path) {
+          s = Object.assign({}, s, { persisted_path: window.__settings.persisted_path });
+        }
         var persisted = !!(res && res.persisted);
-        var hint = (s && s.restart_hint) || "";
-        if (hint) {
-          toast((persisted ? "已保存。" : "已应用。") + hint, false);
+        var restartHint = (s && s.restart_hint) || "";
+        if (restartHint) {
+          toast((persisted ? "已保存。" : "已应用。") + restartHint, false);
         } else {
           toast(persisted ? "已保存并热更新（无需重启）" : "已热更新（无需重启）", true);
         }
-        // 仅重新拉取表单展示服务端状态，不会重启进程
-        load();
+        // 不重建表单：只刷新提示与 JSON 快照，避免「整页刷新/重启」错觉
+        applyMeta(s, {
+          saved: true,
+          persisted: persisted,
+          flash: true,
+          clearSecrets: true
+        });
       }).catch(function (e) {
         if (handleAuthError(e)) return;
         toast(e.message || "保存失败", false);
       }).then(function () {
-        if (btn) btn.disabled = false;
+        if (btn) {
+          btn.disabled = false;
+          btn.classList.remove("is-busy");
+        }
       });
     });
     $("reloadSet").addEventListener("click", load);
