@@ -12,6 +12,8 @@ import (
 	"github.com/yshgsh1343/grokbuild2api/internal/config"
 	"github.com/yshgsh1343/grokbuild2api/internal/httpserver"
 	"github.com/yshgsh1343/grokbuild2api/internal/importjobs"
+	"github.com/yshgsh1343/grokbuild2api/internal/lease"
+	"github.com/yshgsh1343/grokbuild2api/internal/proxypool"
 	"github.com/yshgsh1343/grokbuild2api/internal/protocol/upstream"
 	"github.com/yshgsh1343/grokbuild2api/internal/refresh"
 	"github.com/yshgsh1343/grokbuild2api/internal/ssoimport"
@@ -72,6 +74,10 @@ func wireAdmin(cfg config.Config, pool *poolStack, up *upstreamStack, metrics *h
 		QuarantineOnPaymentRequired:  cfg.Lease.QuarantineOnPaymentRequired,
 		ClearStickyOn429:             cfg.Lease.ClearStickyOn429,
 		ClearStickyOn5xx:             cfg.Lease.ClearStickyOn5xx,
+		RequireProxy:                 false,
+		ProxyPoolEnabled:             false,
+		ProxyAssignMode:              "hash",
+		ImportProxyURL:               "",
 		MaxConcurrent:                cfg.Limits.MaxConcurrent,
 		MaxBodyBytes:                 cfg.Limits.MaxBodyBytes,
 		RequestTimeoutSec:            cfg.Limits.RequestTimeoutSec,
@@ -118,6 +124,15 @@ func wireAdmin(cfg config.Config, pool *poolStack, up *upstreamStack, metrics *h
 	}
 
 	settingsPath := filepath.Join(cfg.DataDir, "settings.json")
+	proxyPoolPath := filepath.Join(cfg.DataDir, "proxy_pool.json")
+	proxyPool, errPool := proxypool.Open(proxyPoolPath)
+	if errPool != nil {
+		logger.Warn("proxy_pool_open_failed", "path", proxyPoolPath, "error", errPool)
+		proxyPool = nil
+	} else {
+		logger.Info("proxy_pool_ready", "path", proxyPoolPath, "nodes", len(proxyPool.Snapshot()))
+	}
+
 	settingsCtl := &admin.SettingsController{
 		Path: settingsPath,
 		Hot:  pool.Hot,
@@ -151,6 +166,37 @@ func wireAdmin(cfg config.Config, pool *poolStack, up *upstreamStack, metrics *h
 	}
 	// 启动密钥进入内存持有（GET 不回传）
 	settingsCtl.SeedSecrets(cfg.APIKey, cfg.AdminKey, sso.APIKey)
+
+	// 代理池策略：require_proxy + 无代理时从池分配并持久化
+	applyProxyPolicy := func(in admin.RuntimeSettings) {
+		mode := strings.TrimSpace(in.ProxyAssignMode)
+		if mode == "" {
+			mode = proxypool.AssignHash
+		}
+		var assign lease.ProxyAssigner
+		var report lease.ProxyFailReporter
+		if in.ProxyPoolEnabled && proxyPool != nil {
+			assign = func(accountID string) (string, string, bool) {
+				return proxyPool.Pick(accountID, mode)
+			}
+			report = func(proxyURL, errMsg string) {
+				proxyPool.MarkFail(proxyURL, errMsg)
+			}
+		}
+		pool.Lease.SetProxyPolicy(in.RequireProxy, assign, report)
+		healthy := 0
+		if proxyPool != nil {
+			healthy = proxyPool.HealthyCount()
+		}
+		logger.Info("proxy_policy_applied",
+			"require_proxy", in.RequireProxy,
+			"pool_enabled", in.ProxyPoolEnabled,
+			"assign_mode", mode,
+			"healthy", healthy,
+		)
+	}
+	settingsCtl.ApplyProxyPolicy = applyProxyPolicy
+
 	// 先建 import manager，再挂 ApplyImport，最后 Load/Apply 设置
 	var importJobs *importjobs.Manager
 	// 始终初始化导入管理器，便于前端热开/热改；enabled=false 时仍可看配置
@@ -370,6 +416,7 @@ func wireAdmin(cfg config.Config, pool *poolStack, up *upstreamStack, metrics *h
 		AccountHot: pool.Hot,
 		Outbound:   up.Outbound,
 		ImportJobs: importJobs,
+		ProxyPool:  proxyPool,
 	}
 
 	return &adminStack{

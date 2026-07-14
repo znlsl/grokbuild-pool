@@ -156,6 +156,8 @@ type Handlers struct {
 	Outbound AccountProbeClient
 	// ImportJobs 异步 bulkimport 任务表（P1）；可空则相关路由 503。
 	ImportJobs *importjobs.Manager
+	// ProxyPool SOCKS5/HTTP 代理池；可空则相关路由 503。
+	ProxyPool ProxyPoolAPI
 }
 
 // effectiveAdminKey 优先使用设置页热更新后的密钥。
@@ -228,6 +230,10 @@ func (h *Handlers) Mount(mux *http.ServeMux) {
 	mux.HandleFunc("GET /admin/config", h.RequireAdmin(h.SafeConfig))
 	mux.HandleFunc("GET /admin/settings", h.RequireAdmin(h.GetSettings))
 	mux.HandleFunc("PUT /admin/settings", h.RequireAdmin(h.PutSettings))
+	// SOCKS5/HTTP 代理池
+	mux.HandleFunc("GET /admin/proxy-pool", h.RequireAdmin(h.GetProxyPool))
+	mux.HandleFunc("PUT /admin/proxy-pool", h.RequireAdmin(h.PutProxyPool))
+	mux.HandleFunc("POST /admin/proxy-pool/assign", h.RequireAdmin(h.AssignProxyPool))
 	// 账号目录（脱敏分页 / 手动启停 / 批量 / 代理 / 导出 / 测活）
 	mux.HandleFunc("GET /admin/accounts", h.RequireAdmin(h.ListAccounts))
 	// 导出与批量路由须先于 /{id}/… 注册

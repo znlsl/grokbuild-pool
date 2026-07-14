@@ -14,8 +14,8 @@ const (
 	DefaultCooldownJitterPct = 20
 	// DefaultCooldownExpMax 429 指数退避最大位移。
 	DefaultCooldownExpMax = 3
-	// DefaultMaxInflightPerAccount 与 hot 对齐的文档默认。
-	DefaultMaxInflightPerAccount = 2
+	// DefaultMaxInflightPerAccount 与 hot 对齐的文档默认（Build 防封 S0：1）。
+	DefaultMaxInflightPerAccount = 1
 )
 
 // Config 控制获取失败切换与释放时的冷却策略。

@@ -1,6 +1,8 @@
 package upstream
 
 import (
+	"crypto/rand"
+	"encoding/hex"
 	"net/http"
 	"strings"
 )
@@ -42,6 +44,11 @@ func ApplyHeaders(req *http.Request, in HeaderInput) {
 	req.Header.Set("x-grok-client-version", version)
 	req.Header.Set("x-grok-client-identifier", identifier)
 	req.Header.Set("User-Agent", ua)
+	// 每请求 request-id（若调用方未设）
+	if strings.TrimSpace(req.Header.Get("x-xai-request-id")) == "" &&
+		strings.TrimSpace(req.Header.Get("X-Request-Id")) == "" {
+		req.Header.Set("x-xai-request-id", newRequestID())
+	}
 
 	if model := strings.TrimSpace(in.Model); model != "" {
 		req.Header.Set("x-grok-model-override", model)
@@ -85,4 +92,12 @@ func firstNonEmpty(values ...string) string {
 		}
 	}
 	return ""
+}
+
+func newRequestID() string {
+	var b [16]byte
+	if _, err := rand.Read(b[:]); err != nil {
+		return "req_fallback"
+	}
+	return "req_" + hex.EncodeToString(b[:])
 }

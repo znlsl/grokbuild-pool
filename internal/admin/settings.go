@@ -48,6 +48,12 @@ type RuntimeSettings struct {
 	ClearStickyOn429            bool  `json:"clear_sticky_on_429"`
 	ClearStickyOn5xx            bool  `json:"clear_sticky_on_5xx"`
 
+	// —— 代理池 / 防封出口 ——
+	RequireProxy     bool   `json:"require_proxy"`
+	ProxyPoolEnabled bool   `json:"proxy_pool_enabled"`
+	ProxyAssignMode  string `json:"proxy_assign_mode"` // hash | least_accounts
+	ImportProxyURL   string `json:"import_proxy_url,omitempty"`
+
 	// —— 进程限制 ——
 	MaxConcurrent     int   `json:"max_concurrent"`
 	MaxBodyBytes      int64 `json:"max_body_bytes"`
@@ -207,6 +213,8 @@ type SettingsController struct {
 	ApplyOAuth func(in RuntimeSettings) error
 	// ApplyLogging 可选：热更新日志级别
 	ApplyLogging func(level string)
+	// ApplyProxyPolicy 可选：热更新 require_proxy / 代理池分配策略
+	ApplyProxyPolicy func(in RuntimeSettings)
 	// storedAPIKey / storedAdminKey 仅内存持有明文（GET 不回传）
 	storedAPIKey   string
 	storedAdminKey string
@@ -505,6 +513,15 @@ func (c *SettingsController) Apply(in RuntimeSettings) (RuntimeSettings, error) 
 	if in.OAuthClientID == "" {
 		in.OAuthClientID = prev.OAuthClientID
 	}
+	if in.ProxyAssignMode == "" {
+		in.ProxyAssignMode = prev.ProxyAssignMode
+		if in.ProxyAssignMode == "" {
+			in.ProxyAssignMode = "hash"
+		}
+	}
+	if in.ImportProxyURL == "" {
+		in.ImportProxyURL = prev.ImportProxyURL
+	}
 	// 负数=未传/保持；0=不限体积；正数=字节上限
 	if in.ImportMaxUploadBytes < 0 {
 		in.ImportMaxUploadBytes = prev.ImportMaxUploadBytes
@@ -653,7 +670,7 @@ func (c *SettingsController) Apply(in RuntimeSettings) (RuntimeSettings, error) 
 			}
 		}
 	}
-	// 即时生效：租约冷却
+	// 即时生效：租约冷却 + 清粘性策略
 	if c.Lease != nil {
 		lc := c.Lease.Config()
 		lc.MaxAttempts = in.MaxAttempts
@@ -666,7 +683,13 @@ func (c *SettingsController) Apply(in RuntimeSettings) (RuntimeSettings, error) 
 		lc.ForbiddenQuarantineAfter = in.ForbiddenQuarantineAfter
 		lc.CooldownJitterPct = in.CooldownJitterPct
 		lc.CooldownExpMax = in.CooldownExpMax
+		lc.QuarantineOnPaymentRequired = in.QuarantineOnPaymentRequired
+		lc.ClearStickyOn429 = in.ClearStickyOn429
+		lc.ClearStickyOn5xx = in.ClearStickyOn5xx
 		c.Lease.ApplyConfig(lc)
+	}
+	if c.ApplyProxyPolicy != nil {
+		c.ApplyProxyPolicy(in)
 	}
 	// 即时生效：选号权重 / sticky / strategy
 	if c.Selector != nil {

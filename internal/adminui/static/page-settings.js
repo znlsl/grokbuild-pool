@@ -14,6 +14,7 @@ export function renderSettings() {
     { id: "http", title: "进程 / HTTP" },
     { id: "refresh", title: "Token 刷新" },
     { id: "token", title: "令牌模板" },
+    { id: "proxy", title: "代理池 / 出口" },
     { id: "import", title: "导入 / SSO" },
     { id: "anthropic", title: "Anthropic" },
     { id: "deploy", title: "部署 / 密钥" },
@@ -25,7 +26,7 @@ export function renderSettings() {
         esc(s.title) + "</button>";
     }).join("") + "</nav>";
   $("main").innerHTML = wrapPage(
-    pageHd("参数设计器", "手动「保存并应用」后写入；多数项即时热更 · 参数尽量热更；仅 listen / data_dir / db_path 需手动重启 · 密钥留空表示不修改",
+    pageHd("参数设计器", "手动「保存并应用」后写入；多数项即时热更 · Build 防封默认少换号；代理池/require_proxy 可热更 · 仅 listen / data_dir / db_path 需重启 · 密钥留空表示不修改",
       '<button type="button" class="page-action-btn" id="reloadSet">重新加载</button>' +
       '<button type="button" class="page-action-btn-primary" id="saveSet">保存并应用</button>') +
     subnav +
@@ -221,6 +222,15 @@ export function renderSettings() {
         field("默认 RPM", "sTR", s.token_default_rpm) +
         fieldBool("默认无限额度", "sTU", !!s.token_default_unlimited)
       );
+            html += section("proxy", "代理池 / 出口（Build 防封）", "SOCKS5/HTTP 节点列表见 API /admin/proxy-pool；开启后无 proxy 的账号 Acquire 时稳定哈希绑定并写库。require_proxy=开则无代理不可用。",
+        fieldBool("强制要求代理", "sReqProxy", !!s.require_proxy) +
+        fieldBool("启用代理池自动分配", "sPoolEn", !!s.proxy_pool_enabled) +
+        fieldSelect("分配模式", "sPoolMode", s.proxy_assign_mode || "hash", [
+          { v: "hash", l: "hash（账号稳定哈希）" },
+          { v: "least_accounts", l: "least_accounts（最少绑定）" }
+        ]) +
+        fieldText("导入专用代理URL(可选)", "sImpProxy", s.import_proxy_url || "", "socks5://… 仅导入用")
+      );
       html += section("import", "导入 / SSO 转换", "保存后即时热更（进行中任务保持旧值，新任务用新值）。参数尽量不写死，仅保留防崩溃上限。",
         fieldBool("启用导入", "sImpEn", !!s.import_enabled) +
         field("最大上传字节(0=不限)", "sImpUp", s.import_max_upload_bytes) +
@@ -323,6 +333,10 @@ export function renderSettings() {
       token_default_max_concurrent: numI("sTC"),
       token_default_rpm: numI("sTR"),
       token_default_unlimited: bool("sTU"),
+      require_proxy: bool("sReqProxy"),
+      proxy_pool_enabled: bool("sPoolEn"),
+      proxy_assign_mode: str("sPoolMode"),
+      import_proxy_url: str("sImpProxy"),
       import_enabled: bool("sImpEn"),
       import_max_upload_bytes: numI("sImpUp"),
       import_max_entries: numI("sImpEnt"),

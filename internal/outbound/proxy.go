@@ -1,12 +1,16 @@
 package outbound
 
 import (
+	"context"
 	"fmt"
+	"net"
 	"net/http"
 	"net/url"
 	"strings"
 	"sync"
 	"time"
+
+	xproxy "golang.org/x/net/proxy"
 
 	"github.com/yshgsh1343/grokbuild2api/internal/protocol/upstream"
 )
@@ -16,7 +20,9 @@ import (
 // 防封号 P1：同一账号尽量复用同一出站客户端；key 可为
 //   - proxyURL（Client）
 //   - accountID + "\x00" + proxyURL（ClientFor，账号-代理亲和）
+//
 // lastProxyByAccount 记录账号最近一次使用的 ProxyURL，便于观测/失效。
+// SOCKS5/SOCKS5h 使用 golang.org/x/net/proxy Dialer（http.ProxyURL 对 socks 无效）。
 type Factory struct {
 	Base upstream.Config
 
@@ -44,7 +50,6 @@ func (f *Factory) ApplyBase(base upstream.Config) {
 	defer f.mu.Unlock()
 	f.Base = base
 	f.cache = make(map[string]*upstream.Client)
-	// lastProxyByAccount 仅记录代理亲和，可保留
 }
 
 // UpdateBaseURL 仅改 base_url 并清空缓存；保留其余 Base 字段。
@@ -58,7 +63,6 @@ func (f *Factory) UpdateBaseURL(baseURL string) {
 	f.cache = make(map[string]*upstream.Client)
 }
 
-// cacheKey 生成缓存键：无 account 时仅用 proxy；有 account 时 accountID\x00proxy。
 func cacheKey(accountID, proxyURL string) string {
 	proxyURL = strings.TrimSpace(proxyURL)
 	accountID = strings.TrimSpace(accountID)
@@ -69,14 +73,11 @@ func cacheKey(accountID, proxyURL string) string {
 }
 
 // Client 返回指定代理（空=直连，不走环境代理）的 upstream 客户端。
-// 等价于 ClientFor("", proxyURL)。
 func (f *Factory) Client(proxyURL string) (*upstream.Client, error) {
 	return f.ClientFor("", proxyURL)
 }
 
 // ClientFor 按账号+代理亲和返回客户端。
-// accountID 非空时缓存键为 accountID+proxyURL，并更新 lastProxyByAccount。
-// 若账号上次代理不同，旧 account 键仍保留直至 Forget/ForgetAccount。
 func (f *Factory) ClientFor(accountID, proxyURL string) (*upstream.Client, error) {
 	if f == nil {
 		return nil, fmt.Errorf("outbound: nil factory")
@@ -119,9 +120,7 @@ func (f *Factory) LastProxy(accountID string) (proxyURL string, ok bool) {
 	return p, ok
 }
 
-// Forget 丢弃与 proxyURL 相关的全部缓存条目（含按账号亲和的键），
-// 以及 lastProxyByAccount 中等于该 proxy 的记录。
-// proxyURL 空串表示直连客户端。
+// Forget 丢弃与 proxyURL 相关的全部缓存条目。
 func (f *Factory) Forget(proxyURL string) {
 	if f == nil {
 		return
@@ -129,9 +128,7 @@ func (f *Factory) Forget(proxyURL string) {
 	proxyURL = strings.TrimSpace(proxyURL)
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	// 精确匹配纯 proxy 键
 	delete(f.cache, proxyURL)
-	// 匹配 account\x00proxy 键
 	suffix := "\x00" + proxyURL
 	for k := range f.cache {
 		if k == proxyURL || strings.HasSuffix(k, suffix) {
@@ -165,7 +162,7 @@ func (f *Factory) ForgetAccount(accountID string) {
 	delete(f.lastProxyByAccount, accountID)
 }
 
-// Len 返回当前缓存客户端数量（测试/观测用）。
+// Len 返回当前缓存客户端数量。
 func (f *Factory) Len() int {
 	if f == nil {
 		return 0
@@ -184,17 +181,34 @@ func (f *Factory) buildClient(proxyURL string) (*upstream.Client, error) {
 		ExpectContinueTimeout: 1 * time.Second,
 	}
 	if proxyURL == "" {
-		// 直连：不使用环境 HTTP_PROXY，避免账号代理被全局代理干扰
+		// 直连：不使用环境 HTTP_PROXY
 		tr.Proxy = nil
 	} else {
 		u, err := url.Parse(proxyURL)
 		if err != nil {
 			return nil, fmt.Errorf("outbound: bad proxy url: %w", err)
 		}
-		if u.Scheme != "http" && u.Scheme != "https" && u.Scheme != "socks5" {
+		scheme := strings.ToLower(u.Scheme)
+		switch scheme {
+		case "http", "https":
+			tr.Proxy = http.ProxyURL(u)
+		case "socks5", "socks5h":
+			// http.ProxyURL 不支持 socks；必须 Dial 走 SOCKS
+			dialer, err := xproxy.FromURL(u, xproxy.Direct)
+			if err != nil {
+				return nil, fmt.Errorf("outbound: socks dialer: %w", err)
+			}
+			if cd, ok := dialer.(xproxy.ContextDialer); ok {
+				tr.DialContext = cd.DialContext
+			} else {
+				tr.DialContext = func(ctx context.Context, network, addr string) (net.Conn, error) {
+					return dialer.Dial(network, addr)
+				}
+			}
+			tr.Proxy = nil
+		default:
 			return nil, fmt.Errorf("outbound: unsupported proxy scheme %q", u.Scheme)
 		}
-		tr.Proxy = http.ProxyURL(u)
 	}
 	cfg := f.Base
 	timeout := cfg.RequestTimeout

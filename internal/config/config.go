@@ -113,7 +113,7 @@ type SelectorConfig struct {
 	WInflight    float64 `yaml:"w_inflight"`
 	WFailure     float64 `yaml:"w_failure"`
 	JitterAmp    float64 `yaml:"jitter_amp"`
-	// MaxInflightPerAccount 单账号并发硬上限（防封号），默认 4。
+	// MaxInflightPerAccount 单账号并发硬上限（防封号），默认 1。
 	MaxInflightPerAccount int `yaml:"max_inflight_per_account"`
 }
 
@@ -205,7 +205,7 @@ func Default() Config {
 			StatusPath: "",
 		},
 		Selector: SelectorConfig{
-			MaxInflightPerAccount: 2,
+			MaxInflightPerAccount: 1,
 			Strategy:              "stable_rr",
 			HotSize:               DefaultHotSize,
 			StickyTTLSec:          1800,

@@ -67,6 +67,13 @@ type Result struct {
 	Success    bool
 }
 
+// ProxyAssigner 在账号无代理时从池中分配并（可选）持久化。
+// 返回 proxyURL、proxyMode；ok=false 表示池中无可用节点。
+type ProxyAssigner func(accountID string) (proxyURL, proxyMode string, ok bool)
+
+// ProxyFailReporter 出站/上游失败时通知代理池冷却节点。
+type ProxyFailReporter func(proxyURL, errMsg string)
+
 // Manager 串联 catalog（密钥）、热索引（inflight/冷却）与 selector（选号）。
 type Manager struct {
 	cat *catalog.Catalog
@@ -79,6 +86,12 @@ type Manager struct {
 	// modelCool: accountID -> model -> unix until（进程内模型级冷却，避免单模型 429 连坐整号）
 	modelMu   sync.Mutex
 	modelCool map[string]map[string]int64
+
+	// 防封：代理池 / 强制代理（均可空）
+	muProxy        sync.RWMutex
+	requireProxy   bool
+	assignProxy    ProxyAssigner
+	reportProxyFail ProxyFailReporter
 }
 
 // New 构造 Manager。cat、idx、sel 均不可为 nil。
@@ -98,6 +111,18 @@ func New(cat *catalog.Catalog, idx *hot.Index, sel *selector.Selector, cfg Confi
 		m.modelCool = loaded
 	}
 	return m
+}
+
+// SetProxyPolicy 配置是否强制代理，以及无代理时的池分配器。
+func (m *Manager) SetProxyPolicy(require bool, assign ProxyAssigner, reportFail ProxyFailReporter) {
+	if m == nil {
+		return
+	}
+	m.muProxy.Lock()
+	m.requireProxy = require
+	m.assignProxy = assign
+	m.reportProxyFail = reportFail
+	m.muProxy.Unlock()
 }
 
 // Config 返回当前配置副本。
@@ -213,6 +238,34 @@ func (m *Manager) acquireOnce(ctx context.Context, stickyKey, model string, trie
 		return Lease{}, fmt.Errorf("lease: account %s model %s cooling", id, model)
 	}
 
+	proxyURL := strings.TrimSpace(acct.ProxyURL)
+	proxyMode := strings.TrimSpace(acct.ProxyMode)
+	if proxyURL == "" {
+		m.muProxy.RLock()
+		require := m.requireProxy
+		assign := m.assignProxy
+		m.muProxy.RUnlock()
+		if assign != nil {
+			if u, mode, ok := assign(id); ok && strings.TrimSpace(u) != "" {
+				proxyURL = strings.TrimSpace(u)
+				proxyMode = strings.TrimSpace(mode)
+				// 持久化绑定：账号=出口长期不漂移
+				if err := m.cat.SetProxy(id, proxyURL, proxyMode); err == nil {
+					acct.ProxyURL = proxyURL
+					acct.ProxyMode = proxyMode
+					if meta, ok := m.idx.Get(id); ok {
+						meta.ProxyURL = proxyURL
+						meta.ProxyMode = proxyMode
+						_, _ = m.idx.Promote(meta)
+					}
+				}
+			}
+		}
+		if proxyURL == "" && require {
+			return Lease{}, fmt.Errorf("lease: account %s requires proxy", id)
+		}
+	}
+
 	if err := m.idx.AddInflight(id); err != nil {
 		// 竞态：pick 与 acquire 之间已从热集 demote。
 		return Lease{}, fmt.Errorf("lease: add inflight %s: %w", id, err)
@@ -226,8 +279,8 @@ func (m *Manager) acquireOnce(ctx context.Context, stickyKey, model string, trie
 		AccountID:   acct.ID,
 		Revision:    uint64(rev),
 		AccessToken: acct.AccessToken,
-		ProxyURL:    acct.ProxyURL,
-		ProxyMode:   acct.ProxyMode,
+		ProxyURL:    proxyURL,
+		ProxyMode:   proxyMode,
 		StickyKey:   stickyKey,
 		Model:       model,
 		Attempt:     attempt,
@@ -436,6 +489,16 @@ func (m *Manager) releaseFailure(lease Lease, result Result, now int64) error {
 
 	if clearSticky {
 		m.clearSticky(lease)
+	}
+
+	// 代理失败：通知池冷却节点（不静默改直连）
+	if lease.ProxyURL != "" && (code == 0 || code == 403 || code >= 500) {
+		m.muProxy.RLock()
+		rep := m.reportProxyFail
+		m.muProxy.RUnlock()
+		if rep != nil {
+			rep(lease.ProxyURL, lastErr)
+		}
 	}
 
 	if err := m.cat.PatchHealth(lease.AccountID, patch); err != nil {
