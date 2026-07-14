@@ -1,15 +1,18 @@
 package selector
 
-// StrategyPow2LeastLoad 为默认选号策略。
-const StrategyPow2LeastLoad = "pow2_least_load"
+// 策略常量。
+const (
+	StrategyPow2LeastLoad = "pow2_least_load"
+	StrategyStableRR      = "stable_rr"
+)
 
-// 默认配置值（Scheme B）。
+// 默认配置值：可用性优先（stable_rr）。
 const (
 	DefaultHotSize      = 3000
 	DefaultStickyTTLSec = 1800
 	DefaultStickyMax    = 100_000
 	DefaultPow2K        = 2
-	DefaultMaxAttempts  = 6
+	DefaultMaxAttempts  = 2
 	DefaultWPriority    = 1.0
 	DefaultWInflight    = 10.0
 	DefaultWFailure     = 5.0
@@ -18,14 +21,14 @@ const (
 
 // Config 控制选号策略、粘性 LRU 与打分权重。
 //
-// 候选分（越高越好）：
+// 候选分（越高越好，仅 pot 使用）：
 //
 //	score = WPriority*priority - WInflight*inflight - WFailure*failureScore + U(-JitterAmp,+JitterAmp)
 //
-// power-of-two-choices 采样 Pow2K 个合格热账号（尽量无放回），返回最高分样本。
-// 有意避免纯最高优先级轮询，使忙碌的高优先级账号可能输给采样中的空闲低优先级账号。
+// stable_rr：最高 priority 可用层内 RoundRobin（对齐 CPA 稳模式）。
+// pow2_least_load：Power-of-K 采样打分。
 type Config struct {
-	// Strategy 目前仅作信息字段；仅实现 pow2_least_load。
+	// Strategy: stable_rr | pow2_least_load
 	Strategy string
 
 	// HotSize 与计划配置对齐保留（实际热容量在 hot.Index 上）。
@@ -40,7 +43,7 @@ type Config struct {
 	// Pow2K 为 power-of-two-choices 采样候选数（默认 2）。
 	Pow2K int
 
-	// MaxAttempts 为调用方建议的获取失败切换预算（默认 6）。
+	// MaxAttempts 为调用方建议的获取失败切换预算（默认 2）。
 	// Selector 自身不循环；由 lease 层使用。
 	MaxAttempts int
 
@@ -61,10 +64,10 @@ type Config struct {
 	MaxInflightPerAccount int32
 }
 
-// DefaultConfig 返回 Scheme B 默认值。
+// DefaultConfig 返回可用性优先默认值。
 func DefaultConfig() Config {
 	return Config{
-		Strategy:     StrategyPow2LeastLoad,
+		Strategy:     StrategyStableRR,
 		HotSize:      DefaultHotSize,
 		StickyTTLSec: DefaultStickyTTLSec,
 		StickyMax:    DefaultStickyMax,
@@ -98,9 +101,6 @@ func (c Config) normalize() Config {
 	if c.MaxAttempts <= 0 {
 		c.MaxAttempts = d.MaxAttempts
 	}
-	// 权重：精确 0 视为“用默认”，以便 YAML 零值仍可用。
-	// 若需真正的 0 权重可设极小 epsilon；测试可显式设非默认值
-	//（含允许的 JitterAmp=0）。
 	if c.WPriority == 0 {
 		c.WPriority = d.WPriority
 	}

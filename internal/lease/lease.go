@@ -1,13 +1,13 @@
 package lease
 
 import (
-	"sync"
 	"context"
 	"errors"
 	"fmt"
-	"strings"
-	"net/url"
 	"math/rand"
+	"net/url"
+	"strings"
+	"sync"
 	"time"
 
 	"github.com/yshgsh1343/grokbuild2api/internal/catalog"
@@ -289,14 +289,28 @@ func decayFailureCount(fc int) int {
 
 func (m *Manager) releaseFailure(lease Lease, result Result, now int64) error {
 	code := result.StatusCode
-	// 403 与 429 一样清粘性+冷却（GAP-014 / CPA MarkFailure）。
-	markBad := code == 429 || code == 401 || code == 402 || code == 403
+	cfg := m.Config()
+	// 可用性优先：冷却与清粘性分级，避免 429/5xx 把号打成“假死”。
+	applyCooldown := code == 429 || code == 401 || code == 402 || code == 403
+	clearSticky := false
+	switch code {
+	case 401, 402, 403:
+		clearSticky = true
+	case 429:
+		clearSticky = cfg.ClearStickyOn429
+	case 0:
+		clearSticky = cfg.ClearStickyOn5xx
+	default:
+		if code >= 500 {
+			clearSticky = cfg.ClearStickyOn5xx
+		}
+	}
 
 	// 读取当前行以合并 failure_count / consecutive_unauthorized。
 	cur, err := m.cat.Get(lease.AccountID)
 	if err != nil {
 		if errors.Is(err, catalog.ErrNotFound) {
-			if markBad {
+			if clearSticky {
 				m.clearSticky(lease)
 			}
 			return nil
@@ -305,12 +319,12 @@ func (m *Manager) releaseFailure(lease Lease, result Result, now int64) error {
 	}
 
 	fc := cur.FailureCount + 1
+	// 5xx/网络错误少记仇：失败分 +1 但可被成功快速衰减；不强制长冷却。
 	used := now
 	lastErr := fmt.Sprintf("upstream %d", code)
 	if code == 0 {
 		lastErr = "upstream network error"
 	}
-	// P1.5：403 记 LastError="forbidden"
 	if code == 403 {
 		lastErr = "forbidden"
 	}
@@ -321,7 +335,7 @@ func (m *Manager) releaseFailure(lease Lease, result Result, now int64) error {
 		LastError:    &lastErr,
 	}
 
-	if markBad {
+	if applyCooldown {
 		coolSec := m.cooldownSeconds(code, result.RetryAfter, fc)
 		until := now + coolSec
 		patch.CooldownUntil = &until
@@ -330,12 +344,11 @@ func (m *Manager) releaseFailure(lease Lease, result Result, now int64) error {
 		if code == 401 {
 			cu := cur.ConsecutiveUnauthorized + 1
 			patch.ConsecutiveUnauthorized = &cu
-			if cu >= m.Config().UnauthorizedQuarantineAfter {
+			if cu >= cfg.UnauthorizedQuarantineAfter {
 				lc := catalog.LifecycleQuarantined
 				en := false
 				patch.Lifecycle = &lc
 				patch.Enabled = &en
-				// 若仍在热集则同步禁用状态。
 				if meta, ok := m.idx.Get(lease.AccountID); ok {
 					meta.Enabled = false
 					meta.Lifecycle = catalog.LifecycleQuarantined
@@ -346,9 +359,7 @@ func (m *Manager) releaseFailure(lease Lease, result Result, now int64) error {
 		}
 
 		if code == 403 {
-			// 可选连续 403 隔离（ForbiddenQuarantineAfter；0=关）。
-			// 用 LastError=="forbidden" 近似连续：上次也是 forbidden 时 streak 累加。
-			if thresh := m.Config().ForbiddenQuarantineAfter; thresh > 0 {
+			if thresh := cfg.ForbiddenQuarantineAfter; thresh > 0 {
 				streak := 1
 				if cur.LastError == "forbidden" {
 					streak = cur.FailureCount + 1
@@ -371,8 +382,8 @@ func (m *Manager) releaseFailure(lease Lease, result Result, now int64) error {
 			}
 		}
 
-		if code == 402 {
-			// 计费硬失败：隔离，使 selector 停止选中。
+		// 402：默认只冷却，不永久隔离（观察期）。显式打开才 quarantine。
+		if code == 402 && cfg.QuarantineOnPaymentRequired {
 			lc := catalog.LifecycleQuarantined
 			en := false
 			patch.Lifecycle = &lc
@@ -384,7 +395,9 @@ func (m *Manager) releaseFailure(lease Lease, result Result, now int64) error {
 				_, _ = m.idx.Promote(meta)
 			}
 		}
+	}
 
+	if clearSticky {
 		m.clearSticky(lease)
 	}
 
@@ -400,6 +413,12 @@ func (m *Manager) releaseFailure(lease Lease, result Result, now int64) error {
 		meta.FailureScore = float32(fc)
 		if patch.CooldownUntil != nil {
 			meta.CooldownUntil = *patch.CooldownUntil
+		}
+		if patch.Enabled != nil {
+			meta.Enabled = *patch.Enabled
+		}
+		if patch.Lifecycle != nil {
+			meta.Lifecycle = *patch.Lifecycle
 		}
 		_, _ = m.idx.Promote(meta)
 	}

@@ -39,7 +39,7 @@ func openPool(cfg config.Config, logger *slog.Logger) *poolStack {
 	hotSize := cfg.EffectiveHotSize()
 	maxInflight := int32(cfg.Selector.MaxInflightPerAccount)
 	if maxInflight <= 0 {
-		maxInflight = 4
+		maxInflight = 2
 	}
 	idx := hot.New(hot.Config{HotSize: hotSize, MaxInflightPerAccount: maxInflight})
 	logger.Info("antiban_limits", "max_inflight_per_account", maxInflight)
@@ -75,6 +75,10 @@ func openPool(cfg config.Config, logger *slog.Logger) *poolStack {
 		ForbiddenCooldownSec:        cfg.Lease.ForbiddenCooldownSec,
 		ForbiddenQuarantineAfter:    cfg.Lease.ForbiddenQuarantineAfter,
 		CooldownJitterPct:           cfg.Lease.CooldownJitterPct,
+		CooldownExpMax:              cfg.Lease.CooldownExpMax,
+		QuarantineOnPaymentRequired: cfg.Lease.QuarantineOnPaymentRequired,
+		ClearStickyOn429:            cfg.Lease.ClearStickyOn429,
+		ClearStickyOn5xx:            cfg.Lease.ClearStickyOn5xx,
 	}
 	leaser := lease.New(cat, idx, sel, leaseCfg)
 

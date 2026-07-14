@@ -24,13 +24,13 @@ const (
 	// DefaultHotSize 为热索引目标容量。
 	DefaultHotSize = 3000
 	// DefaultMaxConcurrent 为流/请求并发硬上限。
-	DefaultMaxConcurrent = 120
+	DefaultMaxConcurrent = 60
 	// DefaultRequestTimeoutSec 限制含 SSE 的完整请求时长。
 	DefaultRequestTimeoutSec = 600
 	// DefaultMaxBodyBytes 为请求体最大字节数（20 MiB）。
 	DefaultMaxBodyBytes = 20 << 20
-	// DefaultMaxAttempts 为 lease 失败切换预算。
-	DefaultMaxAttempts = 6
+	// DefaultMaxAttempts 为 lease 失败切换预算（可用性优先）。
+	DefaultMaxAttempts = 2
 	// Admin 浏览器导入默认资源限制。
 	// 主闸门是 max_entries（默认 1 万条）；max_upload_bytes=0 表示不限体积。
 	// 若显式配置体积上限，则 1 MiB … MaxImportUploadBytes 之间。
@@ -47,7 +47,6 @@ const (
 	MaxImportUploadBytes = 2 << 30
 	// DefaultUpstreamBaseURL 默认直连 Grok Build CLI chat 代理。
 	DefaultUpstreamBaseURL = "https://cli-chat-proxy.grok.com/v1"
-
 )
 
 // Config 为 pool-proxy 的根运行时配置。
@@ -63,6 +62,10 @@ type Config struct {
 
 	// HotSize 为热索引容量（默认 3000）。
 	HotSize int `yaml:"hot_size"`
+
+	// AvailabilityMode 预设：stable | balanced | aggressive。
+	// 在 applyDefaults 早期展开到 selector/lease/limits（仅填充仍为 0/空的字段）。
+	AvailabilityMode string `yaml:"availability_mode"`
 
 	Upstream UpstreamConfig `yaml:"upstream"`
 	// OAuth 控制真实 refresh 脚手架（HTTPRefreshClient / XaiOAuth）。
@@ -128,6 +131,14 @@ type LeaseConfig struct {
 	ForbiddenQuarantineAfter int `yaml:"forbidden_quarantine_after"`
 	// CooldownJitterPct 冷却抖动百分比（默认 20）。
 	CooldownJitterPct int `yaml:"cooldown_jitter_pct"`
+	// CooldownExpMax 429 指数退避最大位移（默认 3）。
+	CooldownExpMax int `yaml:"cooldown_exp_max"`
+	// QuarantineOnPaymentRequired 402 是否隔离（默认 false，仅冷却）。
+	QuarantineOnPaymentRequired bool `yaml:"quarantine_on_payment_required"`
+	// ClearStickyOn429 429 是否立即清粘性（默认 false）。
+	ClearStickyOn429 bool `yaml:"clear_sticky_on_429"`
+	// ClearStickyOn5xx 5xx/网络错误是否清粘性（默认 false）。
+	ClearStickyOn5xx bool `yaml:"clear_sticky_on_5xx"`
 }
 
 // LimitsConfig 强制请求体大小、超时与并发上限。
@@ -167,7 +178,7 @@ type LoggingConfig struct {
 	Level string `yaml:"level"`
 }
 
-// Default 返回默认值（监听 0.0.0.0:8080，热 3000，max_concurrent 120）。
+// Default 返回默认值（监听 0.0.0.0:8080，热 3000，max_concurrent 60，stable 可用性）。
 func Default() Config {
 	proto := protocolconfig.Default()
 	return Config{
@@ -178,6 +189,7 @@ func Default() Config {
 		APIKey:            "",
 		AdminKey:          "",
 		HotSize:           DefaultHotSize,
+		AvailabilityMode:  "stable",
 		Upstream: UpstreamConfig{
 			// 默认直连 Grok；可用 upstream.base_url / UPSTREAM_BASE_URL 覆盖
 			BaseURL:          DefaultUpstreamBaseURL,
@@ -193,8 +205,8 @@ func Default() Config {
 			StatusPath: "",
 		},
 		Selector: SelectorConfig{
-			MaxInflightPerAccount: 4,
-			Strategy:              "pow2_least_load",
+			MaxInflightPerAccount: 2,
+			Strategy:              "stable_rr",
 			HotSize:               DefaultHotSize,
 			StickyTTLSec:          1800,
 			StickyMax:             100_000,
@@ -207,14 +219,18 @@ func Default() Config {
 		},
 		Lease: LeaseConfig{
 			MaxAttempts:                 DefaultMaxAttempts,
-			CooldownBaseSec:             60,
-			CooldownCapSec:              900,
-			UnauthorizedCooldownSec:     120,
-			PaymentRequiredCooldownSec:  300,
-			UnauthorizedQuarantineAfter: 3,
-			ForbiddenCooldownSec:        900,
+			CooldownBaseSec:             30,
+			CooldownCapSec:              300,
+			UnauthorizedCooldownSec:     60,
+			PaymentRequiredCooldownSec:  180,
+			UnauthorizedQuarantineAfter: 5,
+			ForbiddenCooldownSec:        300,
 			ForbiddenQuarantineAfter:    0,
 			CooldownJitterPct:           20,
+			CooldownExpMax:              3,
+			QuarantineOnPaymentRequired: false,
+			ClearStickyOn429:            false,
+			ClearStickyOn5xx:            false,
 		},
 		Anthropic: proto.Anthropic,
 		Limits: LimitsConfig{
@@ -275,6 +291,9 @@ func Load(path string) (Config, error) {
 
 // applyDefaults 在 YAML 合并后填充零值字段。
 func (c *Config) applyDefaults() {
+	// 可用性预设先展开，再做通用零值回填。
+	c.applyAvailabilityMode()
+
 	d := Default()
 	if strings.TrimSpace(c.Listen) == "" {
 		c.Listen = d.Listen
@@ -339,6 +358,9 @@ func (c *Config) applyDefaults() {
 	// ForbiddenQuarantineAfter: 0 合法（关闭），负值归零
 	if c.Lease.ForbiddenQuarantineAfter < 0 {
 		c.Lease.ForbiddenQuarantineAfter = 0
+	}
+	if c.Lease.CooldownExpMax <= 0 {
+		c.Lease.CooldownExpMax = d.Lease.CooldownExpMax
 	}
 	if c.Limits.MaxBodyBytes <= 0 {
 		c.Limits.MaxBodyBytes = d.Limits.MaxBodyBytes
@@ -418,6 +440,87 @@ func (c *Config) applyDefaults() {
 	}
 	if strings.TrimSpace(c.OAuth.StatusPath) == "" {
 		c.OAuth.StatusPath = d.OAuth.StatusPath
+	}
+}
+
+// applyAvailabilityMode expands availability_mode presets into zero/empty fields only.
+func (c *Config) applyAvailabilityMode() {
+	mode := strings.ToLower(strings.TrimSpace(c.AvailabilityMode))
+	if mode == "" {
+		mode = "stable"
+		c.AvailabilityMode = mode
+	}
+	switch mode {
+	case "stable":
+		if c.Selector.Strategy == "" {
+			c.Selector.Strategy = "stable_rr"
+		}
+		if c.Selector.MaxInflightPerAccount == 0 {
+			c.Selector.MaxInflightPerAccount = 1
+		}
+		if c.Selector.MaxAttempts == 0 {
+			c.Selector.MaxAttempts = 2
+		}
+		if c.Lease.MaxAttempts == 0 {
+			c.Lease.MaxAttempts = 2
+		}
+		if c.Limits.MaxConcurrent == 0 {
+			c.Limits.MaxConcurrent = 60
+		}
+	case "balanced":
+		if c.Selector.Strategy == "" {
+			c.Selector.Strategy = "stable_rr"
+		}
+		if c.Selector.MaxInflightPerAccount == 0 {
+			c.Selector.MaxInflightPerAccount = 2
+		}
+		if c.Selector.MaxAttempts == 0 {
+			c.Selector.MaxAttempts = 3
+		}
+		if c.Lease.MaxAttempts == 0 {
+			c.Lease.MaxAttempts = 3
+		}
+		if c.Limits.MaxConcurrent == 0 {
+			c.Limits.MaxConcurrent = 80
+		}
+	case "aggressive":
+		if c.Selector.Strategy == "" {
+			c.Selector.Strategy = "pow2_least_load"
+		}
+		if c.Selector.MaxInflightPerAccount == 0 {
+			c.Selector.MaxInflightPerAccount = 4
+		}
+		if c.Selector.MaxAttempts == 0 {
+			c.Selector.MaxAttempts = 6
+		}
+		if c.Lease.MaxAttempts == 0 {
+			c.Lease.MaxAttempts = 6
+		}
+		if c.Limits.MaxConcurrent == 0 {
+			c.Limits.MaxConcurrent = 120
+		}
+		if c.Lease.CooldownBaseSec == 0 {
+			c.Lease.CooldownBaseSec = 60
+		}
+		if c.Lease.CooldownCapSec == 0 {
+			c.Lease.CooldownCapSec = 900
+		}
+		if c.Lease.UnauthorizedCooldownSec == 0 {
+			c.Lease.UnauthorizedCooldownSec = 120
+		}
+		if c.Lease.PaymentRequiredCooldownSec == 0 {
+			c.Lease.PaymentRequiredCooldownSec = 300
+		}
+		if c.Lease.UnauthorizedQuarantineAfter == 0 {
+			c.Lease.UnauthorizedQuarantineAfter = 3
+		}
+		if c.Lease.ForbiddenCooldownSec == 0 {
+			c.Lease.ForbiddenCooldownSec = 900
+		}
+		c.Lease.QuarantineOnPaymentRequired = true
+		c.Lease.ClearStickyOn429 = true
+	default:
+		c.AvailabilityMode = "stable"
 	}
 }
 
@@ -543,7 +646,6 @@ func (c Config) RequestTimeout() time.Duration {
 	}
 	return time.Duration(sec) * time.Second
 }
-
 
 // ResolveDBPath 选择 catalog SQLite 文件。
 //

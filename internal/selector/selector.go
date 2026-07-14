@@ -9,7 +9,7 @@ import (
 	"github.com/yshgsh1343/grokbuild2api/internal/hot"
 )
 
-// Selector 以粘性亲和与 power-of-two-choices 从合格热账号中选号。
+// Selector 以粘性亲和 + stable_rr / power-of-two-choices 从合格热账号中选号。
 type Selector struct {
 	idx *hot.Index
 
@@ -21,6 +21,10 @@ type Selector struct {
 	// rngMu 保护 rng；测试可通过 SetRand 注入种子源。
 	rngMu sync.Mutex
 	rng   *rand.Rand
+
+	// rrMu 保护 stable_rr 游标。
+	rrMu     sync.Mutex
+	rrCursor uint64
 }
 
 // New 基于给定热索引构建 Selector。
@@ -104,8 +108,13 @@ func (s *Selector) PickExcluding(now int64, stickyKey string, exclude map[string
 		}
 	}
 
-	// 2) 在合格热候选中做 power-of-two-choices。
-	id, ok = s.pow2Pick(now, exclude, cfg)
+	// 2) 按策略选号。
+	switch cfg.Strategy {
+	case StrategyStableRR, "round_robin", "rr":
+		id, ok = s.stableRRPick(now, exclude)
+	default:
+		id, ok = s.pow2Pick(now, exclude, cfg)
+	}
 	if !ok {
 		return "", false
 	}
@@ -175,6 +184,48 @@ func scoreWith(cfg Config, m catalog.HotMeta, jitter float64) float64 {
 		cfg.WInflight*float64(m.Inflight) -
 		cfg.WFailure*float64(m.FailureScore) +
 		jitter
+}
+
+// stableRRPick 在最高 priority 的可用层内 RoundRobin。
+// 对齐 CPA 稳模式：少随机、均匀分摊、避免浪潮式打高优号。
+func (s *Selector) stableRRPick(now int64, exclude map[string]struct{}) (string, bool) {
+	all := s.idx.Eligible(now)
+	if len(all) == 0 {
+		return "", false
+	}
+	// 过滤 exclude，找最高 priority。
+	bestPri := int32(-1 << 30)
+	cands := make([]catalog.HotMeta, 0, len(all))
+	for _, m := range all {
+		if excluded(exclude, m.ID) {
+			continue
+		}
+		if m.Priority > bestPri {
+			bestPri = m.Priority
+			cands = cands[:0]
+			cands = append(cands, m)
+			continue
+		}
+		if m.Priority == bestPri {
+			cands = append(cands, m)
+		}
+	}
+	if len(cands) == 0 {
+		return "", false
+	}
+	// 稳定排序：ID 升序
+	for i := 1; i < len(cands); i++ {
+		j := i
+		for j > 0 && cands[j].ID < cands[j-1].ID {
+			cands[j], cands[j-1] = cands[j-1], cands[j]
+			j--
+		}
+	}
+	s.rrMu.Lock()
+	idx := int(s.rrCursor % uint64(len(cands)))
+	s.rrCursor++
+	s.rrMu.Unlock()
+	return cands[idx].ID, true
 }
 
 // pow2Pick 采样最多 K 个合格候选并返回最高分者。

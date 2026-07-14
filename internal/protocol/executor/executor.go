@@ -22,8 +22,8 @@ import (
 	"github.com/yshgsh1343/grokbuild2api/internal/protocol/upstream"
 )
 
-// DefaultMaxAttempts 在 Executor.MaxAttempts 为零时使用。
-const DefaultMaxAttempts = 6
+// DefaultMaxAttempts 在 Executor.MaxAttempts 为零时使用（可用性优先默认 2）。
+const DefaultMaxAttempts = 2
 
 // Leaser 为 protocol executor 使用的 lease.Manager 子集。
 type Leaser interface {
@@ -57,8 +57,8 @@ type Refresher interface {
 // 401 规则（设置了 Refresher 时）：同账号 ForceRefresh + 同一 lease 重试一次，
 // 再做多账号切换。刷新重试不增加 AcquireCount。
 type Executor struct {
-	Leaser    Leaser
-	Upstream  UpstreamPoster
+	Leaser   Leaser
+	Upstream UpstreamPoster
 	// UpstreamFor 用按 lease 路由的客户端覆盖 Upstream。
 	UpstreamFor UpstreamResolver
 	// Refresher 可选；设置后在 Acquire 后与 401 时运行 EnsureFresh，
@@ -113,6 +113,9 @@ func (e *Executor) Post(ctx context.Context, model, convID string, body []byte, 
 	// 每个逻辑 Post 一个 Idempotency-Key；跨全部凭证尝试共享。
 	idempotencyKey := newIdempotencyKey()
 	extraHeaders := idempotencyHeaders(idempotencyKey)
+	// 429 换号预算：避免一次客户端请求扫穿整个池子。
+	rateLimitFailovers := 0
+	const maxRateLimitFailovers = 1
 
 	for attempt := 1; attempt <= maxAttempts; attempt++ {
 		if err := ctx.Err(); err != nil {
@@ -318,6 +321,19 @@ func (e *Executor) Post(ctx context.Context, model, convID string, body []byte, 
 				"upstream_status", status,
 				"after_refresh", true,
 			)
+			// 429：最多再换 1 个号；防止限流风暴扫池。
+			if status == http.StatusTooManyRequests {
+				rateLimitFailovers++
+				if rateLimitFailovers > maxRateLimitFailovers {
+					e.log(ctx, slog.LevelWarn, "rate_limit_breaker",
+						"account_id", l.AccountID,
+						"attempt", attempt,
+						"failovers", rateLimitFailovers,
+					)
+					return buffered, nil
+				}
+			}
+			// 仅在尚未向客户端写入 body 字节时故障切换。
 			continue
 		}
 
@@ -340,6 +356,18 @@ func (e *Executor) Post(ctx context.Context, model, convID string, body []byte, 
 				"attempt", attempt,
 				"upstream_status", status,
 			)
+			// 429：最多再换 1 个号；防止限流风暴扫池。
+			if status == http.StatusTooManyRequests {
+				rateLimitFailovers++
+				if rateLimitFailovers > maxRateLimitFailovers {
+					e.log(ctx, slog.LevelWarn, "rate_limit_breaker",
+						"account_id", l.AccountID,
+						"attempt", attempt,
+						"failovers", rateLimitFailovers,
+					)
+					return buffered, nil
+				}
+			}
 			// 仅在尚未向客户端写入 body 字节时故障切换。
 			// 此处从未写客户端（仍在 Post 内）。
 			continue

@@ -188,6 +188,8 @@ bin/gateway --workers http://127.0.0.1:8081 --state memory
 
 ## 调度逻辑
 
+默认按**可用性优先（stable）**：少换号、轻惩罚、429 熔断，避免同一请求扫穿账号池。需要冲吞吐可设 `availability_mode: aggressive`。
+
 进程把账号分成 **冷库** 与 **热池**，请求路径上只对热池做选号，密钥仅在租约窗口内从冷库取出。
 
 ### 总流程（一次请求）
@@ -225,7 +227,7 @@ HTTP 请求
 - 同一会话优先钉在同一账号上；账号自带代理时，等价于 **账号粘 = 代理粘**。
 - 429/401/402/403 等失败会清粘性，避免钉死坏号。
 
-### Power-of-Two 选号（pow2_least_load）
+### 选号策略（默认 stable_rr，可选 pow2_least_load）
 未命中粘性时：
 1. 从合格热账号中随机抽 **K** 个（默认 `pow2_k = 2`）；
 2. 打分取最高：
@@ -272,6 +274,7 @@ score = WPriority * priority
 | `api_key` | `api_key`（仅 PUT） | 空 | 热更* | 静态 API Key；GET 不回说明文 |
 | `admin_key` | `admin_key`（仅 PUT） | 示例占位 | 热更* | 管理密钥；公网禁占位符 |
 | `hot_size` | `hot_size` | `3000` | 热更 | 热索引容量（保存后 Resize 并重建） |
+| `availability_mode` | — | `stable` | 启动/预设 | `stable`/`balanced`/`aggressive` 展开选号与冷却默认 |
 | `logging.level` | `logging_level` | `info` | 热更 | `debug` / `info` / `warn` / `error` |
 
 > \* 密钥：PUT 可改内存并落盘；GET 只回 `*_configured` 布尔。
@@ -312,13 +315,13 @@ POOL_OAUTH_ENABLED=1 且 STATUS 中 UNLOCK_M12=true
 
 | YAML 键 | 管理台 JSON | 默认 | 生效方式 | 说明 |
 |---|---|---|---|---|
-| `selector.strategy` | `selector_strategy` | `pow2_least_load` | 信息 / 对齐 | 实现即 PoT 打分 |
+| `selector.strategy` | `selector_strategy` | `stable_rr` | 热更 | `stable_rr` 最高优层轮询；`pow2_least_load` 为吞吐模式 |
 | `selector.hot_size` | （同 `hot_size`） | `3000` | 对齐 | 实际容量在 `hot.Index` |
 | `selector.sticky_ttl_sec` | `sticky_ttl_sec` | `1800` | 热更† | 粘性 TTL（秒） |
 | `selector.sticky_max` | `sticky_max` | `100000` | 热更† | 粘性 LRU 容量 |
 | `selector.pow2_k` | `pow2_k` | `2` | 热更 | Power-of-K 抽样数 |
 | `selector.max_attempts` | `selector_max_attempts` | `6` | 热更 | 建议 failover 次数 |
-| `selector.max_inflight_per_account` | `max_inflight_per_account` | `4` | 热更 | 单账号并发硬上限；`0` = 不硬限 |
+| `selector.max_inflight_per_account` | `max_inflight_per_account` | `2` | 热更 | 单账号并发硬上限；`0` = 不硬限 |
 | `selector.w_priority` | `w_priority` | `1.0` | 热更 | 优先级权重 |
 | `selector.w_inflight` | `w_inflight` | `10.0` | 热更 | inflight 惩罚 |
 | `selector.w_failure` | `w_failure` | `5.0` | 热更 | 失败分惩罚 |
@@ -342,24 +345,24 @@ score = w_priority * priority
 | YAML 键 | 管理台 JSON | 默认 | 生效方式 | 说明 |
 |---|---|---:|---|---|
 | `lease.max_attempts` | `max_attempts` | `6` | 热更 | Acquire 失败换号预算 |
-| `lease.cooldown_base_sec` | `cooldown_base_sec` | `60` | 热更 | 429 无 `Retry-After` 时基数 |
-| `lease.cooldown_cap_sec` | `cooldown_cap_sec` | `900` | 热更 | 冷却上限（秒） |
-| `lease.cooldown_exp_max` | `cooldown_exp_max` | `4` | 热更 | 429：`base * 2^min(fail, exp)` |
+| `lease.cooldown_base_sec` | `cooldown_base_sec` | `30` | 热更 | 429 无 `Retry-After` 时基数 |
+| `lease.cooldown_cap_sec` | `cooldown_cap_sec` | `300` | 热更 | 冷却上限（秒） |
+| `lease.cooldown_exp_max` | `cooldown_exp_max` | `3` | 热更 | 429：`base * 2^min(fail, exp)` |
 | `lease.cooldown_jitter_pct` | `cooldown_jitter_pct` | `20` | 热更 | 冷却抖动百分比（`0–50`） |
-| `lease.unauthorized_cooldown_sec` | `unauthorized_cooldown_sec` | `120` | 热更 | 401 冷却 |
+| `lease.unauthorized_cooldown_sec` | `unauthorized_cooldown_sec` | `60` | 热更 | 401 冷却 |
 | `lease.payment_required_cooldown_sec` | `payment_required_cooldown_sec` | `300` | 热更 | 402 冷却 |
-| `lease.unauthorized_quarantine_after` | `unauthorized_quarantine_after` | `3` | 热更 | 连续 401 隔离阈值 |
-| `lease.forbidden_cooldown_sec` | `forbidden_cooldown_sec` | `900` | 热更 | 403 冷却 |
+| `lease.unauthorized_quarantine_after` | `unauthorized_quarantine_after` | `5` | 热更 | 连续 401 隔离阈值 |
+| `lease.forbidden_cooldown_sec` | `forbidden_cooldown_sec` | `300` | 热更 | 403 冷却 |
 | `lease.forbidden_quarantine_after` | `forbidden_quarantine_after` | `0` | 热更 | 连续 403 隔离；`0` = 关 |
 
 #### 失败语义摘要
 
 | 上游状态 | 默认动作 |
 |---|---|
-| `429` | `Retry-After` 或指数退避 + jitter，封顶 `900s`；清粘性 |
-| `401` | 冷却 `120s`；约连续 `3` 次隔离 |
-| `402` | 冷却 `300s` |
-| `403` | 冷却 `900s`；隔离默认关 |
+| `429` | `Retry-After` 或指数退避 + jitter，封顶 `300s`；默认**不清**粘性；同请求最多再换 1 号 |
+| `401` | 冷却 `60s`；约连续 `5` 次隔离 |
+| `402` | 冷却 `180s`；默认**不隔离**（可开 quarantine_on_payment_required） |
+| `403` | 冷却 `300s`；隔离默认关 |
 | 成功 | `Inflight--` |
 
 ---
@@ -387,7 +390,7 @@ score = w_priority * priority
 
 | YAML 键 | 管理台 JSON | 默认 | 生效方式 | 说明 |
 |---|---|---:|---|---|
-| `limits.max_concurrent` | `max_concurrent` | `120` | 热更 | 全局 in-flight；超限 `503 + Retry-After` |
+| `limits.max_concurrent` | `max_concurrent` | `60` | 热更 | 全局 in-flight；超限 `503 + Retry-After` |
 | `limits.max_body_bytes` | `max_body_bytes` | `20971520`（20MiB） | 热更 | 请求体上限 |
 | `limits.request_timeout_sec` | `request_timeout_sec` | `600` | 热更 | 整请求超时（含 SSE） |
 

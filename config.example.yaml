@@ -23,6 +23,9 @@ admin_key: "local-dev-admin-key-not-for-prod"
 # 热池目标容量
 hot_size: 3000
 
+# stable | balanced | aggressive
+availability_mode: stable
+
 upstream:
   # 默认直连 Grok Build CLI 代理；留空或省略等同该地址
   base_url: "https://cli-chat-proxy.grok.com/v1"
@@ -41,24 +44,28 @@ oauth:
   status_path: ""
 
 selector:
-  strategy: pow2_least_load
+  strategy: stable_rr
   hot_size: 3000
   sticky_ttl_sec: 1800
   sticky_max: 100000
   pow2_k: 2
-  max_attempts: 6
-  max_inflight_per_account: 4
+  max_attempts: 2
+  max_inflight_per_account: 2
 
 lease:
-  max_attempts: 6
-  cooldown_base_sec: 60
-  cooldown_cap_sec: 900
-  unauthorized_cooldown_sec: 120
-  payment_required_cooldown_sec: 300
-  unauthorized_quarantine_after: 3
-  forbidden_cooldown_sec: 900
+  max_attempts: 2
+  cooldown_base_sec: 30
+  cooldown_cap_sec: 300
+  unauthorized_cooldown_sec: 60
+  payment_required_cooldown_sec: 180
+  unauthorized_quarantine_after: 5
+  forbidden_cooldown_sec: 300
   forbidden_quarantine_after: 0
   cooldown_jitter_pct: 20
+  cooldown_exp_max: 3
+  quarantine_on_payment_required: false
+  clear_sticky_on_429: false
+  clear_sticky_on_5xx: false
 
 anthropic:
   enabled: true
@@ -100,7 +107,7 @@ limits:
   max_body_bytes: 20971520
   request_timeout_sec: 600
   # 全局并发硬上限；超出返回 503 + Retry-After: 1
-  max_concurrent: 120
+  max_concurrent: 60
 
 logging:
   level: info
